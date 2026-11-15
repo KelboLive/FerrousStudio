@@ -9,9 +9,9 @@ use std::path::PathBuf;
 pub fn rotate_log() -> PathBuf {
     let dir = ferrous_core::paths::config_dir();
     let _ = std::fs::create_dir_all(&dir);
-    let log = dir.join("ferrous.log");
+    let log = dir.join("ferrous-studio.log");
     if log.exists() {
-        let _ = std::fs::rename(&log, dir.join("ferrous.previous.log"));
+        let _ = std::fs::rename(&log, dir.join("ferrous-studio.previous.log"));
     }
     log
 }
@@ -28,7 +28,7 @@ pub fn install_panic_hook() {
         let name = thread.name().unwrap_or("unnamed").to_string();
         let backtrace = std::backtrace::Backtrace::force_capture();
         let report = format!(
-            "Ferrous {} crashed.\nThread: {name}\n{info}\n\nBacktrace:\n{backtrace}\n",
+            "Ferrous Studio {} crashed.\nThread: {name}\n{info}\n\nBacktrace:\n{backtrace}\n",
             env!("CARGO_PKG_VERSION")
         );
         log::error!("{report}");
@@ -49,9 +49,9 @@ pub fn install_panic_hook() {
             let at = info.location().map(|l| format!(" ({}:{})", l.file(), l.line())).unwrap_or_default();
             let _ = rfd::MessageDialog::new()
                 .set_level(rfd::MessageLevel::Error)
-                .set_title("Ferrous crashed")
+                .set_title("Ferrous Studio crashed")
                 .set_description(format!(
-                    "Ferrous hit an internal error and has to close.\n\n{msg}{at}\n\nA report was saved to:\n{}",
+                    "Ferrous Studio hit an internal error and has to close.\n\n{msg}{at}\n\nA report was saved to:\n{}",
                     path.display()
                 ))
                 .set_buttons(rfd::MessageButtons::Ok)
@@ -82,7 +82,7 @@ pub fn install_native_crash_log() {
                 let n = GetModuleFileNameW(Some(handle), &mut buf) as usize;
                 module = String::from_utf16_lossy(&buf[..n.min(buf.len())]);
             }
-            let text = format!("Ferrous {} native crash: exception 0x{code:08X} at {addr:p} in {module}\n", env!("CARGO_PKG_VERSION"));
+            let text = format!("Ferrous Studio {} native crash: exception 0x{code:08X} at {addr:p} in {module}\n", env!("CARGO_PKG_VERSION"));
             log::error!("{text}");
             log::logger().flush();
             if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(ferrous_core::paths::config_dir().join("native-crash.txt")) {

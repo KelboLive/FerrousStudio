@@ -15,8 +15,9 @@ use ferrous_core::{Transform, VideoFrame};
 use rayon::prelude::*;
 
 pub use ferrous_core::frame::FramePool;
-pub use gpu::{prefer_dx12, GpuCompositor};
+pub use gpu::{share_window_device, GpuCompositor};
 pub use ferrous_nvenc;
+pub use wgpu;
 
 pub struct Composed {
     pub frame: VideoFrame,
@@ -185,6 +186,20 @@ impl Renderer {
         self.preview = width;
     }
 
+    /// On the window's own device (see [`share_window_device`]): the texture the last composition drew
+    /// the preview into, and its generation (a new one for each new size).
+    pub fn window_preview(&self) -> Option<(wgpu::Texture, u64)> {
+        match &self.backend {
+            Backend::Gpu(g) => g.window_preview(),
+            Backend::Cpu(_) => None,
+        }
+    }
+
+    /// Whether the compositor draws on the window's own device.
+    pub fn on_window_device(&self) -> bool {
+        matches!(&self.backend, Backend::Gpu(g) if g.on_window_device())
+    }
+
     /// The GPU-made preview of the frame last returned, if one was drawn: (width, height, RGBA).
     pub fn take_preview(&mut self) -> Option<(u32, u32, Vec<u8>)> {
         match &mut self.backend {
@@ -201,8 +216,11 @@ impl Renderer {
         // A memoised frame only counts if it has what this frame needs.
         let gpu = matches!(self.backend, Backend::Gpu(_));
         // (A preview from the GPU needs a fresh drawing, or a memoised frame with BGRA to scale.)
+        // A preview drawn on the window's device holds whatever was drawn last, which needn't be the
+        // memoised frame (or its size): draw it fresh then.
+        let window_preview = self.preview.is_some() && self.on_window_device();
         let (need_bgra, need_nv12) = (self.bgra || !gpu || self.preview.is_some(), self.nv12 && gpu);
-        if let Some(frame) = self.memo.get(false, layers).filter(|f| (!need_bgra || !f.data.is_empty()) && (!need_nv12 || (f.nv12.is_some() && f.nv12_jfif == self.nv12_jfif))) {
+        if let Some(frame) = self.memo.get(false, layers).filter(|_| !window_preview).filter(|f| (!need_bgra || !f.data.is_empty()) && (!need_nv12 || (f.nv12.is_some() && f.nv12_jfif == self.nv12_jfif))) {
             return Composed { frame, cpu_ms: vec![0.0; layers.len()], gpu_ms: Vec::new(), gpu_total_ms: None };
         }
         let out = match &mut self.backend {

@@ -2,7 +2,7 @@
 //!
 //! Ferrous writes NV12 frames into a named shared-memory region; the camera
 //! source (`ferrous-vcam-source`, a Media Foundation media source that Windows
-//! 11's Frame Server loads when an app opens "Ferrous Virtual Camera")
+//! 11's Frame Server loads when an app opens "Ferrous Studio Virtual Camera")
 //! reads the newest one for each sample it delivers.
 //!
 //! The region is created by the camera source, not by Ferrous: the Frame
@@ -28,7 +28,7 @@ pub const NAME_GLOBAL: &str = "Global\\FerrousVirtualCamera";
 pub const NAME_LOCAL: &str = "Local\\FerrousVirtualCamera";
 /// The camera source's COM class id.
 pub const CLSID: &str = "{93AC3189-7309-4939-A983-6883CEE48652}";
-pub const FRIENDLY_NAME: &str = "Ferrous Virtual Camera";
+pub const FRIENDLY_NAME: &str = "Ferrous Studio Virtual Camera";
 
 #[repr(C)]
 pub struct Header {

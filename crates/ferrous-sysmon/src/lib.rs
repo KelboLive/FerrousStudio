@@ -240,14 +240,22 @@ mod tests {
     fn samples_own_process() {
         let m = SystemMonitor::start();
         m.set_disk_path(&std::env::temp_dir());
-        // Burn a little CPU so there's something to see.
-        let end = std::time::Instant::now() + Duration::from_millis(2300);
+        // Burn CPU so there's something to see, until a sample shows it. On Windows the first sample
+        // only comes ~5 s after start (the monitor waits out GPU start-up), so don't assume a time.
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
         let mut x = 0u64;
-        while std::time::Instant::now() < end {
-            x = x.wrapping_mul(6364136223846793005).wrapping_add(1);
-        }
+        let s = loop {
+            let end = std::time::Instant::now() + Duration::from_millis(250);
+            while std::time::Instant::now() < end {
+                x = x.wrapping_mul(6364136223846793005).wrapping_add(1);
+            }
+            let s = m.snapshot();
+            let ready = s.sys_mem_total > 0 && s.own.cpu > 5.0 && s.disk_free.is_some();
+            if ready || std::time::Instant::now() > deadline {
+                break s;
+            }
+        };
         std::hint::black_box(x);
-        let s = m.snapshot();
         assert!(s.sys_mem_total > 0);
         assert!(s.own.mem_bytes > 0, "{s:?}");
         assert!(s.own.cpu > 5.0, "own CPU {}", s.own.cpu);

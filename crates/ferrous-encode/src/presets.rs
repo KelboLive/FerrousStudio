@@ -83,8 +83,6 @@ pub fn encoder_settings(e: &EncoderInfo, level: Level) -> EncoderSettings {
         keyframe_interval_secs: 2,
         b_frames,
         custom_args: String::new(),
-        hdr: false,
-        hdr_white_nits: 203,
     }
 }
 
@@ -128,7 +126,7 @@ pub fn summary(e: &EncoderSettings) -> String {
         RateControl::Cqp => format!("QP {}", e.quality),
     };
     let preset = if e.preset.is_empty() { String::new() } else { format!(", preset {}", e.preset) };
-    format!("{}, {rate}{preset}{}", e.encoder, if e.hdr { ", HDR10" } else { "" })
+    format!("{}, {rate}{preset}", e.encoder)
 }
 
 /// Whether `r` currently matches `p` (for highlighting the active preset).

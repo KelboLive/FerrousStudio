@@ -16,25 +16,6 @@ pub fn encoder_pix_fmt(encoder: &str) -> &'static str {
     }
 }
 
-/// Whether this encoder can produce HDR10 (10-bit HEVC or AV1; H.264 and
-/// Media Foundation's HEVC are 8-bit here).
-pub fn supports_hdr(encoder: &str) -> bool {
-    matches!(catalog::find(encoder), Some(e) if matches!(e.codec, catalog::Codec::Hevc | catalog::Codec::Av1) && e.vendor != Vendor::MediaFoundation)
-}
-
-/// Whether these settings really produce HDR (asked for and supported).
-pub fn hdr_active(s: &EncoderSettings) -> bool {
-    s.hdr && supports_hdr(&s.encoder)
-}
-
-/// [`encoder_pix_fmt`] for HDR output: 10-bit.
-pub fn encoder_pix_fmt_for(s: &EncoderSettings) -> &'static str {
-    match (hdr_active(s), encoder_pix_fmt(&s.encoder)) {
-        (true, "nv12") => "p010le",
-        (true, _) => "yuv420p10le",
-        (false, f) => f,
-    }
-}
 
 /// Encoders that take frames already on the GPU: FFmpeg must create a
 /// device and upload to it. Returns (global args placed before the inputs,
@@ -223,18 +204,7 @@ pub fn video_args(s: &EncoderSettings, fps: u32) -> Vec<String> {
     }
 
     push(&mut a, &["-g", &gop, "-keyint_min", &gop]);
-    if hdr_active(s) {
-        if matches!(s.encoder.as_str(), "hevc_nvenc" | "hevc_qsv") {
-            push(&mut a, &["-profile:v", "main10"]);
-        }
-        push(&mut a, &[
-            "-color_primaries", "bt2020", "-color_trc", "smpte2084", "-colorspace", "bt2020nc", "-color_range", "tv",
-        ]);
-    } else {
-        push(&mut a, &[
-            "-color_primaries", "bt709", "-color_trc", "bt709", "-colorspace", "bt709", "-color_range", "tv",
-        ]);
-    }
+    push(&mut a, &["-color_primaries", "bt709", "-color_trc", "bt709", "-colorspace", "bt709", "-color_range", "tv"]);
     a.extend(split_custom(&s.custom_args));
     a
 }
@@ -313,21 +283,6 @@ mod tests {
         assert!(j.contains("-preset p5"), "{j}");
         assert!(j.contains("-rc vbr -cq 19 -b:v 0"), "{j}");
         assert_eq!(encoder_pix_fmt("hevc_nvenc"), "nv12");
-    }
-
-    #[test]
-    fn hdr_needs_hevc_or_av1_and_tags_the_stream() {
-        let mut s = EncoderSettings { encoder: "hevc_nvenc".into(), hdr: true, ..EncoderSettings::streaming_default() };
-        assert_eq!(encoder_pix_fmt_for(&s), "p010le");
-        let j = joined(&s);
-        assert!(j.contains("-profile:v main10"), "{j}");
-        assert!(j.contains("-color_primaries bt2020 -color_trc smpte2084 -colorspace bt2020nc -color_range tv"), "{j}");
-        s.encoder = "libsvtav1".into();
-        assert_eq!(encoder_pix_fmt_for(&s), "yuv420p10le");
-        s.encoder = "h264_nvenc".into();
-        assert_eq!(encoder_pix_fmt_for(&s), "nv12");
-        assert!(joined(&s).contains("-colorspace bt709"));
-        assert!(!supports_hdr("libx264") && !supports_hdr("hevc_mf") && supports_hdr("av1_qsv"));
     }
 
     #[test]

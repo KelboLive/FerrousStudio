@@ -80,7 +80,7 @@ impl Kind {
             Kind::Pattern => "▤",
             Kind::Text => "🅰",
             Kind::Camera => "📷",
-            Kind::Window => "🗗",
+            Kind::Window => "🪟",
             Kind::Plugin(..) => "🔌",
             Kind::Obs(..) => "📦",
         }
@@ -101,7 +101,7 @@ impl Kind {
             Kind::Text => "Text, or the contents of a file.",
             Kind::Camera => "A webcam or capture card.",
             Kind::Window => "One app's window.",
-            Kind::Plugin(..) => "A source from a Ferrous plugin.",
+            Kind::Plugin(..) => "A source from a Ferrous Studio plugin.",
             Kind::Obs(..) => "A source from your OBS Studio install.",
         }
     }
@@ -217,7 +217,9 @@ pub fn show(ctx: &egui::Context, st: &mut State, cat: &Catalog) -> Outcome {
         .show(ctx, |ui| {
             ui.horizontal_top(|ui| {
                 // ---- left: the list of types
-                ui.allocate_ui(Vec2::new(215.0, 400.0), |ui| {
+                // Top to bottom explicitly: inside the horizontal row the column would otherwise lay
+                // its entries out sideways, piling them up on top of each other.
+                ui.allocate_ui_with_layout(Vec2::new(215.0, 400.0), egui::Layout::top_down(egui::Align::Min), |ui| {
                     egui::ScrollArea::vertical().id_salt("add_types").show(ui, |ui| {
                         ui.set_width(200.0);
                         row(ui, st, Page::Recent, "🕒", "Recently Created");

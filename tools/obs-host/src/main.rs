@@ -469,7 +469,7 @@ impl Host {
             bail!("this host already runs a source");
         }
         let data = (self.api.obs_data_create_from_json)(c(&settings.to_string()).as_ptr());
-        let src = (self.api.obs_source_create)(c(id).as_ptr(), c("Ferrous").as_ptr(), data, std::ptr::null_mut());
+        let src = (self.api.obs_source_create)(c(id).as_ptr(), c("Ferrous Studio").as_ptr(), data, std::ptr::null_mut());
         (self.api.obs_data_release)(data);
         if src.is_null() {
             bail!("OBS couldn't create a \"{id}\" source (is its plugin installed?)");

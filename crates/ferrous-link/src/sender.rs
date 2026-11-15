@@ -43,7 +43,7 @@ pub struct SenderStats {
     /// Frames skipped because the encoder was still busy.
     pub frames_skipped: AtomicU64,
     pub bytes_sent: AtomicU64,
-    /// Current JPEG quality (adaptive).
+    /// JPEG quality in use.
     pub quality: AtomicU32,
     pub kbps: AtomicU32,
     /// JPEGs made straight from the GPU's YCbCr (no BGRA read-back, no colour conversion).
@@ -110,17 +110,25 @@ struct ChanReader {
     rx: crossbeam_channel::Receiver<Vec<u8>>,
     buf: Vec<u8>,
     pos: usize,
+    /// The sender is shutting down: end the stream even though the encoder still holds the channel
+    /// open (waiting on it forever deadlocked every Link restart: the encoder only stops once this
+    /// reader is gone, and the restart waited for this reader).
+    stop: Arc<AtomicBool>,
 }
 
 impl std::io::Read for ChanReader {
     fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
-        if self.pos >= self.buf.len() {
-            match self.rx.recv() {
+        while self.pos >= self.buf.len() {
+            if self.stop.load(Ordering::Relaxed) {
+                return Ok(0);
+            }
+            match self.rx.recv_timeout(Duration::from_millis(100)) {
                 Ok(b) => {
                     self.buf = b;
                     self.pos = 0;
                 }
-                Err(_) => return Ok(0),
+                Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
+                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => return Ok(0),
             }
         }
         let n = out.len().min(self.buf.len() - self.pos);
@@ -355,7 +363,7 @@ impl LinkSender {
             let ann = Announcement {
                 ember_link: protocol::PROTO_VERSION,
                 id: protocol::random_hex(8),
-                name: cfg.name.clone(),
+                name: cfg.name.trim().to_string(),
                 port,
                 codec: codec_kind(&cfg.codec),
                 width: cfg.width,
@@ -363,6 +371,7 @@ impl LinkSender {
                 fps: cfg.fps,
                 encrypted: !cfg.pin.is_empty(),
                 host: String::new(),
+                computer: discovery::computer_name(),
             };
             threads.push(thread::Builder::new().name("link-beacon".into()).spawn(move || {
                 while !stop.load(Ordering::Relaxed) {
@@ -387,7 +396,7 @@ impl LinkSender {
             (None, None)
         };
         match cfg.codec.clone() {
-            LinkCodec::Jpeg { quality, adaptive, full_chroma } => {
+            LinkCodec::Jpeg { quality, full_chroma } => {
                 // obs-teleport's design: several workers each encode a whole
                 // frame, so throughput scales with cores while every frame
                 // is one simple JPEG; an orderer sends them strictly in order.
@@ -450,10 +459,7 @@ impl LinkSender {
                 let (stats, force_key) = (stats.clone(), force_key.clone());
                 stats.quality.store(quality as u32, Ordering::Relaxed);
                 threads.push(thread::Builder::new().name("link-dispatch".into()).spawn(move || {
-                    let mut q = quality;
-                    let mut last_adjust = Instant::now();
-                    let mut drops_at_adjust = 0;
-                    let mut clean_secs = 0;
+                    let q = quality;
                     let mut last: Option<Arc<Vec<u8>>> = None;
                     for (seq, f) in frames_rx.into_iter().enumerate() {
                         let (seq, ts) = (seq as u64, protocol::now_us());
@@ -472,22 +478,6 @@ impl LinkSender {
                             if job_tx.send((seq, ts, f, q)).is_err() {
                                 break;
                             }
-                        }
-                        // Adaptive quality, once a second.
-                        if adaptive && last_adjust.elapsed() >= Duration::from_secs(1) {
-                            last_adjust = Instant::now();
-                            let drops = stats.frames_dropped.load(Ordering::Relaxed);
-                            if drops > drops_at_adjust {
-                                q = q.saturating_sub(8).max(35);
-                                clean_secs = 0;
-                            } else {
-                                clean_secs += 1;
-                                if clean_secs >= 3 {
-                                    q = (q + 3).min(quality);
-                                }
-                            }
-                            drops_at_adjust = drops;
-                            stats.quality.store(q as u32, Ordering::Relaxed);
                         }
                     }
                 })?);
@@ -519,7 +509,7 @@ impl LinkSender {
                     }
                 })?);
             }
-            LinkCodec::Hardware { encoder, bitrate_kbps } => {
+            LinkCodec::Hardware { encoder, bitrate_kbps, preset } => {
                 let fps = cfg.fps.max(1);
                 let es = EncoderSettings {
                     encoder: encoder.clone(),
@@ -527,20 +517,18 @@ impl LinkSender {
                     rate_control: RateControl::Vbr,
                     bitrate_kbps,
                     quality: 23,
-                    preset: String::new(),
+                    preset: if encoder.contains("nvenc") { format!("p{}", preset.clamp(1, 7)) } else { String::new() },
                     keyframe_interval_secs: 1,
                     b_frames: 0,
                     custom_args: String::new(),
-                    hdr: false,
-                    hdr_white_nits: 203,
                 };
-                // Ferrous converts (and scales) to NV12 on all cores, so the pipe
+                // Ferrous Studio converts (and scales) to NV12 on all cores, so the pipe
                 // carries 1.5 bytes per pixel instead of 4 and FFmpeg's
                 // single-threaded converter is skipped; hardware encoders
                 // take NV12 as it is.
                 let mut stdout: Box<dyn Read + Send> = if let Some(rx) = external_rx.take() {
                     let _ = (&es, &frames_rx);
-                    Box::new(ChanReader { rx, buf: Vec::new(), pos: 0 })
+                    Box::new(ChanReader { rx, buf: Vec::new(), pos: 0, stop: stop.clone() })
                 } else {
                 let (w, h) = ((cfg.width & !1).max(2), (cfg.height & !1).max(2));
                 let mut args: Vec<String> = ["-hide_banner", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "nv12"].iter().map(|s| s.to_string()).collect();
@@ -714,6 +702,8 @@ impl LinkSender {
 impl Drop for LinkSender {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
+        // Let go of the in-process encoder's channel, so it sees the Link is gone once the reader ends.
+        self.external = None;
         for c in self.clients.lock().drain(..) {
             let _ = c.stream.shutdown(Shutdown::Both);
         }

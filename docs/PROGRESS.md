@@ -1343,3 +1343,40 @@ which items count as shown, and the grace period.
 - **Links** are synced after the render thread starts.
 - **Window**: `Engine::control()` returns a cloneable handle (shared state, audio engine, settings); the app starts record/stream/replay through it on a helper thread and shows the result as a toast; buttons read "Starting…" meanwhile and repeated presses are ignored. Test: a recording started from another thread writes a file.
 - **CI fix**: `b_frames_keep_their_timing` ran FFmpeg's tee muxer with absolute Windows paths; it now runs in the temp folder with relative names.
+
+## 1.0: Ferrous Studio, installer, Link and replay fixes: done
+
+**Rename.** Everything a user sees is now *Ferrous Studio*: window and projector titles, `Ferrous Studio.exe`
+(with Windows version info), the virtual camera ("Ferrous Studio Virtual Camera"), the VST3 host name, messages,
+docs and the GitHub repository (`KelboLive/FerrousStudio`). Internal crate names stay `ferrous-*`. Settings move
+to `%APPDATA%\Ferrous Studio`: on first launch the old `%APPDATA%\Ferrous` folder is copied there (replay
+buffers, logs and hand-kept builds left out) and left untouched. Test: `paths::settings_carry_over_from_ferrous_without_scratch`.
+
+**Installer.** `installer/FerrousStudio.iss` (Inno Setup 6), built by the Windows workflow: the app, FFmpeg and
+ffprobe, the virtual camera DLL, the OBS plugin host, the example plugin, licences; the C runtime is linked into
+the binaries (`.cargo/config.toml`, `+crt-static`); WebView2 is installed only where Windows lacks it; an optional
+Windows Firewall rule lets Ferrous Link through. A `v*` tag publishes the installer and a portable zip as a
+GitHub release with `docs/RELEASE_NOTES.md`.
+
+**Hardware Link restart freeze.** Changing any Hardware Link setting with the in-process NVENC encoder froze the
+app until Windows closed it: dropping the old Link joined its stream thread, which waited for data from the GPU
+encoder, which only stops once the Link is gone. The stream reader now polls the Link's stop flag and the sender
+drops its end of the channel first. Test: `externally_fed_link_stops_while_its_encoder_still_runs`; an HEVC
+end-to-end test of the same path (`externally_fed_hevc_stream_decodes`) runs when its sample stream exists.
+
+**Receiver "os error 3".** A saved FFmpeg path that no longer exists (an older install's folder) made every
+Hardware Link receiver fail to start its decoder. `ffmpeg::locate` now falls back to the bundled FFmpeg, and the
+error names the path tried. Confirmed on the stream PC: the Link showed a picture once the path was cleared.
+
+**Hardware Link quality.** NVENC preset is a setting (P1–P7, default P6, also passed to the FFmpeg fallback);
+keyframe every 2 s.
+
+**Replay hitch every 2 s.** Measured on a saved vertical replay: 1,502 frames over 25.5 s, with a 37–67 ms hole at
+every 2.0 s (both main and vertical replays). Cause: segments were cut with `-reset_timestamps 1` and joined with
+FFmpeg's concat demuxer, which spaced them by an estimated duration. Segments now keep continuous timestamps and
+are piped back to back into FFmpeg. Reproduced and fixed locally (gaps of 32–49 ms before, none after); test
+`saved_replay_has_no_gaps_between_segments`. On the stream PC afterwards: 1,846 frames over 30.8 s, no gaps,
+59.9 unique frames a second in motion.
+
+**Startup "frame size mismatch".** The first frame or two after a vertical output starts come from a read-back
+requested before the output existed (preview only, no picture); they are now skipped quietly.

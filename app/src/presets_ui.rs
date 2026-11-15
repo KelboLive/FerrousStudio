@@ -289,10 +289,7 @@ impl PresetsUi {
         ui.label(RichText::new("Best value: within a barely visible difference of the best quality, but the lightest on your PC. Quality is measured against the original footage; speed assumes nothing else is running, so leave headroom when recording a game.").small().color(theme::muted()));
         let original = |t: &TrialResult| r.originals.get(&t.label).cloned().unwrap_or_else(|| t.encoder.clone());
         if let Some(i) = use_it {
-            let mut e = original(&r.results[i]);
-            e.hdr = settings.record.encoder.hdr;
-            e.hdr_white_nits = settings.record.encoder.hdr_white_nits;
-            settings.record.encoder = e;
+            settings.record.encoder = original(&r.results[i]);
             settings.record.same_as_stream = false;
         }
         if let Some(i) = save_it {

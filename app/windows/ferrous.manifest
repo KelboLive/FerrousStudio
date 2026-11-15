@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
-  <assemblyIdentity type="win32" name="Ferrous" version="0.1.0.0" processorArchitecture="amd64"/>
+  <assemblyIdentity type="win32" name="FerrousStudio" version="1.0.0.0" processorArchitecture="amd64"/>
   <!-- Common Controls v6: used by the WebView2 hosting in custom docks. -->
   <dependency>
     <dependentAssembly>

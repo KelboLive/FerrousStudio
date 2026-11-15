@@ -101,10 +101,8 @@ pub fn recording_path(folder: &Path, filename_format: &str, format: RecordingFor
 /// YUV layout an encoder takes: NV12 for hardware, I420 for software.
 pub fn encoder_layout(es: &ferrous_core::EncoderSettings) -> convert::YuvLayout {
     use convert::YuvLayout as L;
-    match args::encoder_pix_fmt_for(es) {
+    match args::encoder_pix_fmt(&es.encoder) {
         "nv12" => L::Nv12,
-        "p010le" => L::P010,
-        "yuv420p10le" => L::I420P10,
         _ => L::I420,
     }
 }
@@ -121,10 +119,6 @@ pub fn set_gpu_nv12(on: bool) {
 /// "Auto" when the GPU hands over finished NV12 (no CPU work left to save
 /// by letting FFmpeg do it).
 pub fn effective_conversion(v: &VideoSettings, es: &ferrous_core::EncoderSettings) -> ConversionMode {
-    // FFmpeg's own scaler can't do the SDR-to-HDR mapping.
-    if args::hdr_active(es) {
-        return ConversionMode::Ferrous;
-    }
     match resolved_conversion(v) {
         ConversionMode::Ffmpeg if v.conversion == ConversionMode::Auto && GPU_NV12.load(std::sync::atomic::Ordering::Relaxed) && gpu_nv12_applies(v, es) => {
             ConversionMode::Ferrous
@@ -225,11 +219,7 @@ pub fn build_args_for(cfg: &OutputConfig, audio_ports: &[u16], encoded: Option<&
         let (w, h) = encoder_input_size(v);
         let size = format!("{w}x{h}");
         push(&[tqs(), &["-f", "rawvideo", "-pix_fmt", encoder_layout(&cfg.encoder).ffmpeg_pix_fmt()]].concat());
-        if args::hdr_active(&cfg.encoder) {
-            push(&["-color_range", "tv", "-colorspace", "bt2020nc", "-color_primaries", "bt2020", "-color_trc", "smpte2084"]);
-        } else {
-            push(&["-color_range", "tv", "-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709"]);
-        }
+        push(&["-color_range", "tv", "-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709"]);
         push(&["-video_size", &size, "-framerate", &fps, "-i", "pipe:0"]);
     } else {
         let size = format!("{}x{}", v.base_width, v.base_height);
@@ -302,7 +292,9 @@ pub fn build_args_for(cfg: &OutputConfig, audio_ports: &[u16], encoded: Option<&
             }
             push(&["-max_muxing_queue_size", "4096"]);
             push(&["-f", "segment", "-segment_time", &segment_secs.to_string()]);
-            push(&["-segment_wrap", &count.to_string(), "-reset_timestamps", "1", "-segment_format", "mpegts"]);
+            // Timestamps run on across segments (no reset): saving joins the segments end to end, and
+            // per-segment timestamps left a ~50 ms hole at every 2 s boundary (a visible hitch).
+            push(&["-segment_wrap", &count.to_string(), "-segment_format", "mpegts"]);
             a.push(dir.join("seg%03d.ts").to_string_lossy().into_owned());
         }
         Target::Stream { url } => {
@@ -430,12 +422,7 @@ impl Output {
         let audio_stop = Arc::new(AtomicBool::new(false));
         let frame_bytes = (cfg.video.base_width * cfg.video.base_height * 4) as usize;
         let converter = (effective_conversion(&cfg.video, &cfg.encoder) == ConversionMode::Ferrous).then(|| {
-            convert::Converter::with_white(
-                (cfg.video.base_width, cfg.video.base_height),
-                encoder_input_size(&cfg.video),
-                encoder_layout(&cfg.encoder),
-                cfg.encoder.hdr_white_nits as f32,
-            )
+            convert::Converter::new((cfg.video.base_width, cfg.video.base_height), encoder_input_size(&cfg.video), encoder_layout(&cfg.encoder))
         });
         // A few frames of buffer; more just adds latency and memory.
         // (Compressed packets are small; give them more room so a muxer hiccup doesn't stall the encoder.)
@@ -483,7 +470,14 @@ impl Output {
                     // The GPU's NV12 needs no BGRA (the compositor may not have read any back).
                     let ready = converter.as_ref().and_then(|c| c.ready_made(&frame));
                     if ready.is_none() && frame.byte_len() != frame_bytes {
-                        log::error!("frame size mismatch: {frame:?}");
+                        // The first frame or two after an output starts can come from a GPU read-back
+                        // that was requested before this output existed (only the preview wanted it,
+                        // so it has no full picture). Nothing to write; the next frame has one.
+                        if frame.byte_len() == 0 {
+                            log::debug!("output: skipped a frame without a picture (output just started)");
+                        } else {
+                            log::error!("frame size mismatch: {frame:?}");
+                        }
                         continue;
                     }
                     let bytes: &[u8] = match (&converter, ready) {
@@ -747,20 +741,30 @@ pub fn save_replay(ffmpeg_path: &Path, dir: &Path, seconds: u32, segment_secs: u
     segs.sort();
     let want = (seconds.div_ceil(segment_secs.max(1)) + 1) as usize;
     let chosen = &segs[segs.len().saturating_sub(want)..];
-    let list = dir.join("concat.txt");
-    let mut text = String::new();
-    for (_, p) in chosen {
-        text.push_str(&format!("file '{}'\n", p.display().to_string().replace('\'', "'\\''")));
-    }
-    std::fs::write(&list, text)?;
+    // MPEG-TS segments with continuous timestamps join byte for byte; FFmpeg's concat demuxer instead
+    // spaced them by an estimated duration and left a gap of a few frames at every boundary.
     let mut cmd = ffmpeg::command(ffmpeg_path);
-    cmd.args(["-hide_banner", "-loglevel", "error", "-y", "-f", "concat", "-safe", "0", "-i"]).arg(&list);
+    cmd.args(["-hide_banner", "-loglevel", "error", "-y", "-f", "mpegts", "-i", "pipe:0"]);
     cmd.args(["-map", "0", "-c", "copy"]);
     if matches!(format, RecordingFormat::Mp4 | RecordingFormat::FragmentedMp4 | RecordingFormat::Mov) {
         cmd.args(["-bsf:a", "aac_adtstoasc", "-movflags", "+faststart"]);
     }
     cmd.args(["-f", format.ffmpeg_muxer()]).arg(out);
-    let o = cmd.stdin(Stdio::null()).output()?;
+    let mut child = cmd.stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::piped()).spawn()?;
+    let mut stdin = child.stdin.take().expect("piped stdin");
+    let files: Vec<PathBuf> = chosen.iter().map(|(_, p)| p.clone()).collect();
+    let feeder = std::thread::spawn(move || {
+        for f in files {
+            // The segment being written now may be cut short mid-packet; FFmpeg resyncs on the next one.
+            if let Ok(mut r) = std::fs::File::open(&f) {
+                if std::io::copy(&mut r, &mut stdin).is_err() {
+                    break;
+                }
+            }
+        }
+    });
+    let o = child.wait_with_output()?;
+    let _ = feeder.join();
     if !o.status.success() {
         anyhow::bail!("saving replay failed: {}", String::from_utf8_lossy(&o.stderr).trim());
     }
@@ -787,6 +791,44 @@ fn redact(argv: &[String]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A saved replay plays its segments back to back: no timestamp hole (a visible hitch) at the
+    /// segment boundaries, in video or audio.
+    #[test]
+    fn saved_replay_has_no_gaps_between_segments() {
+        let ff = Path::new("ffmpeg");
+        if ffmpeg::command(ff).arg("-version").output().is_err() {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("ferrous-replay-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // The same segmenting as the replay buffer, from a B-frame stream with audio.
+        let ok = ffmpeg::command(ff)
+            .args(["-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=60", "-f", "lavfi", "-i", "sine", "-t", "9"])
+            .args(["-c:v", "libx264", "-bf", "3", "-force_key_frames", "expr:gte(t,n_forced*2)", "-c:a", "aac"])
+            .args(["-f", "segment", "-segment_time", "2", "-segment_wrap", "18", "-segment_format", "mpegts"])
+            .arg(dir.join("seg%03d.ts"))
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok);
+        let out = dir.join("out.mkv");
+        save_replay(ff, &dir, 6, 2, &out, RecordingFormat::Mkv).unwrap();
+        for stream in ["v", "a"] {
+            let o = std::process::Command::new("ffprobe")
+                .args(["-v", "error", "-select_streams", stream, "-show_entries", "packet=pts_time", "-of", "csv=p=0"])
+                .arg(&out)
+                .output()
+                .unwrap();
+            let mut t: Vec<f64> = String::from_utf8_lossy(&o.stdout).lines().filter_map(|l| l.trim().trim_end_matches(',').parse().ok()).collect();
+            t.sort_by(f64::total_cmp);
+            assert!(t.len() > 100, "{stream}: {} packets", t.len());
+            let worst = t.windows(2).map(|w| w[1] - w[0]).fold(0.0, f64::max);
+            assert!(worst < 0.03, "{stream}: a {:.0} ms hole", worst * 1000.0);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn urls() {
@@ -927,7 +969,7 @@ mod tests {
         let b = decode(ConversionMode::Ffmpeg, "ffmpeg.mkv");
         let mse = a.iter().zip(&b).map(|(x, y)| (*x as f64 - *y as f64).powi(2)).sum::<f64>() / a.len() as f64;
         let psnr = 10.0 * (255.0f64 * 255.0 / mse.max(1e-9)).log10();
-        println!("Ferrous vs FFmpeg conversion PSNR: {psnr:.1} dB");
+        println!("Ferrous Studio vs FFmpeg conversion PSNR: {psnr:.1} dB");
         assert!(psnr > 30.0, "PSNR {psnr:.1} dB");
     }
 

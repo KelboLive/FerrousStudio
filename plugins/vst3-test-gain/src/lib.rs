@@ -53,7 +53,7 @@ unsafe fn len_wstring(string: *const TChar) -> usize {
 // with a second parameter, state save/restore and 1 sample of latency so the
 // host's parameter, state and latency paths are exercised.
 
-const PLUGIN_NAME: &str = "Ferrous Test Gain";
+const PLUGIN_NAME: &str = "Ferrous Studio Test Gain";
 
 struct GainProcessor {
     gain: AtomicU64,
@@ -530,7 +530,7 @@ impl IPluginFactoryTrait for Factory {
     unsafe fn getFactoryInfo(&self, info: *mut PFactoryInfo) -> tresult {
         let info = &mut *info;
 
-        copy_cstring("Ferrous", &mut info.vendor);
+        copy_cstring("Ferrous Studio", &mut info.vendor);
         copy_cstring("https://example.com", &mut info.url);
         copy_cstring("someone@example.com", &mut info.email);
         info.flags = PFactoryInfo_::FactoryFlags_::kUnicode as int32;

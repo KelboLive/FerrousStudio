@@ -1,8 +1,8 @@
-# Writing Ferrous plugins
+# Writing Ferrous Studio plugins
 
 A plugin is a DLL that exports one function, `ferrous_plugin_module`, returning a static table of
 plugins. A DLL can provide any number of plugins of three kinds: **video sources**, **video
-filters** and **audio filters**. Put plugin DLLs in `%APPDATA%\Ferrous\plugins` or in a
+filters** and **audio filters**. Put plugin DLLs in `%APPDATA%\Ferrous Studio\plugins` or in a
 `plugins` folder next to `ferrous.exe`. They're loaded at startup and appear in the
 **Add Source → Plugins** menu and in every **Add filter** menu.
 
@@ -11,7 +11,7 @@ filter and a gain filter. In Rust, depend on the `ferrous-plugin-api` crate. In 
 header:
 
 ```c
-// ferrous_plugin.h: Ferrous plugin ABI v1
+// ferrous_plugin.h: Ferrous Studio plugin ABI v1
 #include <stdint.h>
 
 #define FERROUS_PLUGIN_ABI_VERSION 1

@@ -30,8 +30,9 @@ pub fn section_title(ui: &mut egui::Ui, text: &str) {
 }
 
 /// Big primary action button (Start Streaming / Start Recording).
-pub fn action_button(ui: &mut egui::Ui, text: &str, active: bool) -> egui::Response {
-    let size = Vec2::new(ui.available_width(), 38.0);
+/// (At a given height: shorter when its dock is short.)
+pub fn action_button_h(ui: &mut egui::Ui, text: &str, active: bool, height: f32) -> egui::Response {
+    let size = Vec2::new(ui.available_width(), height);
     let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click());
     let base = if active { theme::live() } else { theme::surface() };
     let fill = if resp.is_pointer_button_down_on() {
@@ -100,14 +101,12 @@ pub fn hint(label: &str) -> Option<&'static str> {
         "Microphone" => "The input device captured as your microphone.",
         "Monitoring device" => "Where monitored audio plays (usually your headphones), so you can hear a source without sending it to the stream.",
         "Encoder" => "What compresses the video. Hardware encoders (NVENC, QSV, AMF) use your graphics card and barely touch the CPU. x264 runs on the CPU and gets more quality per bit.",
-        "Encoder input" => "Where video is converted to the encoder's colour format. Ferrous does it on all CPU cores, or the GPU when available; FFmpeg does it on one core. Auto picks the best for your setup.",
         "FFmpeg path" => "The ffmpeg.exe used for encoding. The bundled copy is used when this is empty.",
         "File name" => "Naming pattern for recordings. Date and time codes such as %CCYY-%MM-%DD are filled in.",
         "Folder" => "Where recordings and replay clips are saved.",
-        "Format" => "The container for recordings. MKV survives a crash; MP4 is the most compatible but can be lost if Ferrous closes unexpectedly (fragmented MP4 is safer).",
+        "Format" => "The container for recordings. MKV survives a crash; MP4 is the most compatible but can be lost if Ferrous Studio closes unexpectedly (fragmented MP4 is safer).",
         "Frame rate" => "Frames per second for the canvas and everything encoded. 60 looks smoother in games but costs more of everything.",
-        "GPU priority" => "Asks Windows to schedule Ferrous's GPU work ahead of other programs, which helps when a game uses the whole GPU.",
-        "GPU readback" => "Reads each GPU frame back one frame later so the program never waits for the GPU. Smoother, with one frame more delay.",
+        "GPU priority" => "Asks Windows to schedule Ferrous Studio's GPU work ahead of other programs, which helps when a game uses the whole GPU.",
         "Keep the last" => "How many seconds the replay buffer holds. Save Replay writes this much of the past to a file.",
         "Keyframe interval" => "Seconds between full keyframes. Most platforms want 2. Shorter means viewers join faster and costs some bitrate.",
         "Preset" => "Speed against quality for the encoder. Slower presets compress better and use more of the encoder.",
@@ -136,10 +135,9 @@ pub fn hint(label: &str) -> Option<&'static str> {
         "Studio Mode" | "Exit Studio Mode" => "Edit the next scene in a separate preview, then send it live with Transition.",
         "Transition ▶" => "Switches the live program to the scene being edited, using the selected transition.",
         "Enable preview" => "Draws the program in the preview. Turning it off saves CPU and GPU; streaming and recording are unaffected.",
-        "Enable remote control server" => "Lets phones and other apps control Ferrous over your network. Set a password first.",
+        "Enable remote control server" => "Lets phones and other apps control Ferrous Studio over your network. Set a password first.",
         "Current scene only" => "Shows only this scene's sources in the Performance monitor instead of every source.",
         "🔒 Lock layout" => "Stops docks from being dragged, resized or closed by accident.",
-        "Adapt to network" => "Lowers quality automatically when the link can't keep up and raises it again when it recovers.",
         "Send audio from" => "Sends a mixer track's audio to the receiving PC along with the video.",
         "Read from file" => "Takes the text from a file and updates it whenever the file changes.",
         "Show" => "Reveals the hidden value.",

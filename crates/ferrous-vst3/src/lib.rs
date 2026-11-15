@@ -261,7 +261,7 @@ impl Class for HostApp {
 
 impl IHostApplicationTrait for HostApp {
     unsafe fn getName(&self, name: *mut String128) -> tresult {
-        let s: Vec<u16> = "Ferrous".encode_utf16().collect();
+        let s: Vec<u16> = "Ferrous Studio".encode_utf16().collect();
         let n = &mut *name;
         n.iter_mut().for_each(|c| *c = 0);
         for (d, c) in n.iter_mut().zip(s) {

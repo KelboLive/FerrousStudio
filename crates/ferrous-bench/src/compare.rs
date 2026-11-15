@@ -159,7 +159,7 @@ pub fn run_trial(ffmpeg_path: &Path, spec: &Spec, reference: &Path, trial: &Tria
     let _ = std::fs::remove_file(&encoded);
     let es = &trial.encoder;
     let hw = args::hw_upload(&es.encoder);
-    let mut vf = format!("format={}", args::encoder_pix_fmt_for(es));
+    let mut vf = format!("format={}", args::encoder_pix_fmt(&es.encoder));
     if let Some((_, f)) = &hw {
         vf.push(',');
         vf.push_str(f);
@@ -260,7 +260,7 @@ pub fn sweep(working: &[&'static catalog::EncoderInfo], base: &EncoderSettings) 
     for e in working.iter().filter(|e| e.name != "libaom-av1") {
         let names: Vec<&str> = if e.presets.is_empty() { vec![""] } else { vec![e.presets[0], e.presets[e.presets.len() / 2], e.presets[e.presets.len() - 1]] };
         for name in names {
-            let mut es = EncoderSettings { encoder: e.name.to_string(), preset: name.to_string(), hdr: false, ..base.clone() };
+            let mut es = EncoderSettings { encoder: e.name.to_string(), preset: name.to_string(), ..base.clone() };
             if e.vendor.is_hardware() && matches!(es.rate_control, RateControl::Cbr) {
                 es.b_frames = base.b_frames;
             }

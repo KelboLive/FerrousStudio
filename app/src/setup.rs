@@ -230,7 +230,7 @@ impl Setup {
                             ui.checkbox(&mut self.test_ingests, "Test YouTube's primary and backup ingest servers");
                         }
                         Platform::TikTok => {
-                            ui.label(RichText::new("TikTok gives you one server per LIVE session, so there are no alternatives to rank. Ferrous checks that server when you go live.").small().color(theme::muted()));
+                            ui.label(RichText::new("TikTok gives you one server per LIVE session, so there are no alternatives to rank. Ferrous Studio checks that server when you go live.").small().color(theme::muted()));
                         }
                         Platform::Custom => {
                             ui.checkbox(&mut self.test_ingests, "Rank these servers (one URL per line):");

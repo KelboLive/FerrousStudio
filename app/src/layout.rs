@@ -11,7 +11,7 @@ use std::collections::HashMap;
 
 use eframe::egui::{self, Color32, CornerRadius, Margin, Stroke};
 use egui_stack::{DockState, NodeIndex, OverlayType, Style, TabPath};
-use ferrous_core::{DockState as LegacyDockState, SnapGuides, UiSettings};
+use ferrous_core::{DockState as LegacyDockState, UiSettings};
 use serde::{Deserialize, Serialize};
 
 use crate::theme;
@@ -64,10 +64,7 @@ impl Dock {
             Dock::Custom(_) => "Custom Dock",
         }
     }
-    /// The preview can be moved anywhere but never closed.
-    pub fn closeable(self) -> bool {
-        self != Dock::Preview
-    }
+
     /// Docks whose content fills them edge to edge: no scroll bars, no
     /// padding (the canvases, and web pages, which scroll themselves).
     pub fn is_canvas(self) -> bool {
@@ -100,7 +97,7 @@ pub const PRESETS: [Preset; 4] = [Preset::Ferrous, Preset::Classic, Preset::Anal
 impl Preset {
     pub fn label(self) -> &'static str {
         match self {
-            Preset::Ferrous => "Ferrous (default)",
+            Preset::Ferrous => "Ferrous Studio (default)",
             Preset::Classic => "Classic (OBS-style)",
             Preset::Analytics => "Analytics",
             Preset::Vertical => "Vertical / TikTok",
@@ -256,8 +253,18 @@ impl Layout {
         self.anchors.insert(d, mate);
     }
 
+    /// Whether `d` may be closed now: any dock but a canvas, and either canvas while the other one is
+    /// open (so a vertical-only streamer can close the main preview, but there is always a preview).
+    pub fn can_close(&self, d: Dock) -> bool {
+        match d {
+            Dock::Preview => self.is_open(Dock::Vertical),
+            Dock::Vertical => self.is_open(Dock::Preview),
+            _ => true,
+        }
+    }
+
     pub fn close(&mut self, d: Dock) {
-        if !d.closeable() {
+        if !self.can_close(d) {
             return;
         }
         self.remferrous_anchor(d);
@@ -352,7 +359,6 @@ impl Layout {
 pub fn keep_layout(old: &UiSettings, new: &mut UiSettings) {
     new.layout = old.layout.clone();
     new.saved_layouts = old.saved_layouts.clone();
-    new.snap_guides = old.snap_guides;
     new.lock_layout = old.lock_layout;
     new.custom_docks = old.custom_docks.clone();
     new.preview_enabled = old.preview_enabled;
@@ -376,26 +382,27 @@ pub fn parse(s: &str) -> Option<DockState<Dock>> {
 // -------------------------------------------------------------------- style
 
 /// Dock chrome matched to the Ferrous theme, with accent-coloured snap guides.
-pub fn style(egui_style: &egui::Style, cfg: &UiSettings) -> Style {
+pub fn style(egui_style: &egui::Style) -> Style {
     let mut s = Style::from_egui(egui_style);
     let accent = theme::accent();
-    s.dock_area_padding = Some(Margin::same(6));
+    // Tight, so tiles use the screen rather than gaps (tabs only where a tile holds several docks).
+    s.dock_area_padding = Some(Margin::same(3));
     s.main_surface_border_stroke = Stroke::NONE;
 
-    s.separator.width = 6.0;
-    s.separator.extra_interact_width = 4.0;
+    s.separator.width = 3.0;
+    s.separator.extra_interact_width = 6.0;
     s.separator.color_idle = theme::chrome();
     s.separator.color_hovered = accent.linear_multiply(0.55);
     s.separator.color_dragged = accent;
 
     s.tab_bar.bg_fill = theme::chrome();
-    s.tab_bar.height = 28.0;
+    s.tab_bar.height = 22.0;
     s.tab_bar.hline_color = theme::border();
-    s.tab_bar.corner_radius = CornerRadius { nw: 8, ne: 8, sw: 0, se: 0 };
+    s.tab_bar.corner_radius = CornerRadius { nw: 5, ne: 5, sw: 0, se: 0 };
 
     let tab = |bg: Color32, text: Color32, outline: Color32| egui_stack::TabInteractionStyle {
         outline_color: outline,
-        corner_radius: CornerRadius { nw: 6, ne: 6, sw: 0, se: 0 },
+        corner_radius: CornerRadius { nw: 4, ne: 4, sw: 0, se: 0 },
         bg_fill: bg,
         text_color: text,
     };
@@ -407,22 +414,27 @@ pub fn style(egui_style: &egui::Style, cfg: &UiSettings) -> Style {
     s.tab.focused_with_kb_focus = s.tab.focused.clone();
     s.tab.inactive_with_kb_focus = s.tab.inactive.clone();
     s.tab.hline_below_active_tab_name = true;
-    s.tab.tab_body.inner_margin = Margin::same(8);
+    s.tab.tab_body.inner_margin = Margin::same(5);
+    // A tile without a tab bar is dragged by the strip holding its corner title.
+    s.tab.tab_body.hidden_tab_bar_drag_height = Some(5.0 + crate::app::CORNER_TITLE_H);
     s.tab.tab_body.stroke = Stroke::new(1.0, if theme::glassy() { theme::border().lerp_to_gamma(Color32::WHITE, 0.22) } else { theme::border() });
-    let br = if theme::glassy() { 12 } else { 8 };
-    s.tab.tab_body.corner_radius = CornerRadius { nw: 0, ne: br, sw: br, se: br };
+    let br = if theme::glassy() { 8 } else { 5 };
+    s.tab.tab_body.corner_radius = CornerRadius::same(br);
     s.tab.tab_body.bg_fill = theme::tint(theme::panel(), 0.5);
 
+    // The dock library's own "show tab bar" triangle would sit on a tile's corner title; tab bars
+    // are shown and hidden by the app (only tiles holding several docks have one), so it goes.
+    s.buttons.show_tab_bar_size = 0.0;
+    s.buttons.show_tab_bar_hover_expand = 0.0;
+    s.buttons.show_tab_bar_color = Color32::TRANSPARENT;
+    s.buttons.show_tab_bar_active_color = Color32::TRANSPARENT;
     s.buttons.close_tab_color = theme::muted();
     s.buttons.close_tab_active_color = theme::live();
     s.buttons.close_tab_bg_fill = theme::surface();
 
     // Snap guides.
     let o = &mut s.overlay;
-    o.overlay_type = match cfg.snap_guides {
-        SnapGuides::Zones => OverlayType::Zones,
-        SnapGuides::Compass => OverlayType::Widgets,
-    };
+    o.overlay_type = OverlayType::Zones;
     o.selection_color = accent.linear_multiply(0.35);
     o.selection_stroke_width = 2.0;
     o.zone_fill = accent.linear_multiply(0.18);

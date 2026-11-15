@@ -6,7 +6,7 @@ use std::sync::atomic::Ordering::Relaxed;
 use std::time::{Duration, Instant};
 
 use eframe::egui::{self, Color32, Pos2, RichText, Sense, Shape, Stroke, Vec2};
-use ferrous_core::{SnapGuides, UiSettings};
+use ferrous_core::UiSettings;
 use ferrous_engine::{EngineStatus, SourcePerf};
 use ferrous_sysmon::Snapshot;
 
@@ -41,7 +41,8 @@ pub fn view_menu(ui: &mut egui::Ui, l: &mut Layout, settings: &mut UiSettings, n
         let open = l.is_open(d);
         ui.horizontal(|ui| {
             let mut shown = open;
-            let r = ui.add_enabled(d.closeable(), egui::Checkbox::new(&mut shown, title));
+            // Reopening is always allowed; closing only if `can_close` (a canvas needs the other open).
+            let r = ui.add_enabled(!open || l.can_close(d), egui::Checkbox::new(&mut shown, title));
             if r.changed() {
                 if shown { l.open(d) } else { l.close(d) }
             }
@@ -69,11 +70,6 @@ pub fn view_menu(ui: &mut egui::Ui, l: &mut Layout, settings: &mut UiSettings, n
     }
     ui.separator();
     ui.checkbox(&mut settings.lock_layout, "🔒 Lock layout").on_hover_text("Prevent docks from being dragged or closed by accident");
-    ui.horizontal(|ui| {
-        ui.label("Snap guides");
-        ui.selectable_value(&mut settings.snap_guides, SnapGuides::Zones, "Zones").on_hover_text("The part of the panel the dock will take lights up as you approach an edge");
-        ui.selectable_value(&mut settings.snap_guides, SnapGuides::Compass, "Compass").on_hover_text("Drop buttons appear in the middle of the panel under the pointer");
-    });
     ui.separator();
     ui.menu_button("Layout presets", |ui| {
         for p in PRESETS {
@@ -149,7 +145,8 @@ pub fn sparkline(ui: &mut egui::Ui, h: &History, max: f32, color: Color32, size:
     if h.0.len() < 2 {
         return;
     }
-    let max = h.0.iter().cloned().fold(max, f32::max).max(1e-3);
+    // A quarter of headroom above the recent peak, so a busy line doesn't sit pinned at the top.
+    let max = (h.0.iter().cloned().fold(0.0, f32::max) * 1.25).max(max).max(1e-3);
     let n = HISTORY_LEN as f32;
     let start = HISTORY_LEN - h.0.len();
     let pts: Vec<Pos2> = h
@@ -179,7 +176,16 @@ pub struct Smooth(HashMap<String, f32>);
 
 impl Smooth {
     pub fn get(&mut self, key: &str, target: f32) -> f32 {
+        // A bad reading (NaN/infinite, e.g. a division before the first system sample) must not
+        // poison the average for good: show 0 for it and start over from the next good one.
+        if !target.is_finite() {
+            self.0.remove(key);
+            return 0.0;
+        }
         let v = self.0.entry(key.to_string()).or_insert(target);
+        if !v.is_finite() {
+            *v = target;
+        }
         *v += (target - *v) * 0.15;
         *v
     }
@@ -206,12 +212,16 @@ pub struct StatsInput<'a> {
 
 const STAT_GROUPS: &[(&str, &[(&str, &str)])] = &[
     ("Rendering", &[("fps", "Frame rate"), ("frame_time", "Average frame time"), ("max_frame", "Worst frame (1 s)"), ("lagged", "Frames missed by rendering"), ("renderer", "Compositor"), ("gpu_pass", "GPU compositing time")]),
-    ("System", &[("ember_cpu", "Ferrous CPU"), ("ember_mem", "Ferrous memory"), ("sys_cpu", "System CPU"), ("sys_mem", "System memory"), ("gpu", "GPU usage"), ("vram", "GPU memory (VRAM)")]),
+    ("System", &[("ember_cpu", "Ferrous Studio CPU"), ("ember_mem", "Ferrous Studio memory"), ("sys_cpu", "System CPU"), ("sys_mem", "System memory"), ("gpu", "GPU usage"), ("vram", "GPU memory (VRAM)")]),
     ("Storage", &[("disk_free", "Free space (recordings drive)"), ("rec_left", "Recording time left")]),
     ("Outputs", &[("outputs", "Stream, destinations, recording")]),
     ("Audio", &[("audio_buffers", "Audio buffer per channel")]),
     ("Network", &[("links", "Ferrous Link outputs"), ("remote", "Remote-control clients")]),
 ];
+
+fn add(items: &mut Vec<(String, RichText)>, label: &str, value: impl Into<RichText>) {
+    items.push((label.to_string(), value.into()));
+}
 
 fn row(ui: &mut egui::Ui, label: &str, value: impl Into<RichText>) {
     ui.label(RichText::new(label).color(theme::muted()));
@@ -252,58 +262,60 @@ pub fn stats_dock(ui: &mut egui::Ui, s: &StatsInput<'_>, cfg: &mut UiSettings, s
     let st = s.status;
     let sys = s.sys;
     egui::ScrollArea::vertical().id_salt("stats_scroll").show(ui, |ui| {
-        egui::Grid::new("stats_grid").num_columns(2).striped(true).spacing([18.0, 4.0]).show(ui, |ui| {
+        // Collected first, then laid out in as many columns as the dock's width holds (a wide dock
+        // used to show one column with empty space beside it, and needed scrolling).
+        let mut items: Vec<(String, RichText)> = Vec::new();
             if on("fps") {
                 let fps = smooth.get("fps", st.fps);
-                row(ui, "Frame rate", RichText::new(format!("{fps:.1} / {} fps", s.fps_target)).color(level(s.fps_target as f32 - fps, 1.0, 5.0)));
+                add(&mut items, "Frame rate", RichText::new(format!("{fps:.1} / {} fps", s.fps_target)).color(level(s.fps_target as f32 - fps, 1.0, 5.0)));
             }
             if on("frame_time") {
                 let budget = 1000.0 / s.fps_target.max(1) as f32;
-                row(ui, "Average frame time", RichText::new(format!("{:.2} ms (budget {budget:.1} ms)", smooth.get("ft", st.render_ms))).color(level(st.render_ms / budget, 0.7, 1.0)));
+                add(&mut items, "Average frame time", RichText::new(format!("{:.2} ms (budget {budget:.1} ms)", smooth.get("ft", st.render_ms))).color(level(st.render_ms / budget, 0.7, 1.0)));
             }
             if on("max_frame") {
-                row(ui, "Worst frame (1 s)", format!("{:.2} ms", st.max_frame_ms));
+                add(&mut items, "Worst frame (1 s)", format!("{:.2} ms", st.max_frame_ms));
             }
             if on("lagged") {
-                row(ui, "Frames missed by rendering", RichText::new(st.lagged_frames.to_string()).color(if st.lagged_frames > 0 { theme::warn() } else { theme::text() }));
+                add(&mut items, "Frames missed by rendering", RichText::new(st.lagged_frames.to_string()).color(if st.lagged_frames > 0 { theme::warn() } else { theme::text() }));
             }
             if on("renderer") {
-                row(ui, "Compositor", st.renderer.clone());
+                add(&mut items, "Compositor", st.renderer.clone());
             }
             if on("gpu_pass") {
-                row(ui, "GPU compositing time", st.gpu_ms.map(|g| format!("{:.3} ms", smooth.get("gpu_ms", g))).unwrap_or_else(|| "n/a (CPU compositor or no timestamps)".into()));
+                add(&mut items, "GPU compositing time", st.gpu_ms.map(|g| format!("{:.3} ms", smooth.get("gpu_ms", g))).unwrap_or_else(|| "n/a (CPU compositor or no timestamps)".into()));
             }
             if on("ember_cpu") {
-                let v = smooth.get("own_cpu", sys.own.cpu / sys.cores as f32);
-                row(ui, "Ferrous CPU", RichText::new(format!("{v:.1}% of all cores ({:.0}% of one core)", sys.own.cpu)).color(level(v, 50.0, 80.0)));
+                let v = smooth.get("own_cpu", sys.own.cpu / sys.cores.max(1) as f32);
+                add(&mut items, "Ferrous Studio CPU", RichText::new(format!("{v:.1}% of all cores ({:.0}% of one core)", sys.own.cpu)).color(level(v, 50.0, 80.0)));
             }
             if on("ember_mem") {
-                row(ui, "Ferrous memory", fmt_bytes(sys.own.mem_bytes));
+                add(&mut items, "Ferrous Studio memory", fmt_bytes(sys.own.mem_bytes));
             }
             if on("sys_cpu") {
                 let v = smooth.get("sys_cpu", sys.sys_cpu);
-                row(ui, "System CPU", RichText::new(format!("{v:.1}% ({} threads)", sys.cores)).color(level(v, 70.0, 90.0)));
+                add(&mut items, "System CPU", RichText::new(format!("{v:.1}% ({} threads)", sys.cores)).color(level(v, 70.0, 90.0)));
             }
             if on("sys_mem") {
                 let pct = sys.sys_mem_used as f32 / sys.sys_mem_total.max(1) as f32 * 100.0;
-                row(ui, "System memory", RichText::new(format!("{} / {} ({pct:.0}%)", fmt_bytes(sys.sys_mem_used), fmt_bytes(sys.sys_mem_total))).color(level(pct, 80.0, 92.0)));
+                add(&mut items, "System memory", RichText::new(format!("{} / {} ({pct:.0}%)", fmt_bytes(sys.sys_mem_used), fmt_bytes(sys.sys_mem_total))).color(level(pct, 80.0, 92.0)));
             }
             if on("gpu") {
-                row(ui, "GPU usage", match sys.gpu {
+                add(&mut items, "GPU usage", match sys.gpu {
                     Some(g) => RichText::new(format!("{:.0}% (busiest engine)", smooth.get("gpu", g))).color(level(g, 80.0, 95.0)),
                     None => RichText::new("n/a on this system"),
                 });
             }
             if on("vram") {
-                row(ui, "GPU memory (VRAM)", sys.vram_used.map(fmt_bytes).unwrap_or_else(|| "n/a on this system".into()));
+                add(&mut items, "GPU memory (VRAM)", sys.vram_used.map(fmt_bytes).unwrap_or_else(|| "n/a on this system".into()));
             }
             if on("disk_free") {
-                row(ui, "Free space (recordings drive)", sys.disk_free.map(fmt_bytes).unwrap_or_else(|| "unknown".into()));
+                add(&mut items, "Free space (recordings drive)", sys.disk_free.map(fmt_bytes).unwrap_or_else(|| "unknown".into()));
             }
             if on("rec_left") {
                 let kbps = if st.recording.active && st.recording.bitrate_kbps > 0.0 { st.recording.bitrate_kbps } else { s.record_kbps_setting as f32 };
                 let left = sys.disk_free.map(|b| b as f32 * 8.0 / 1000.0 / kbps.max(1.0));
-                row(ui, "Recording time left", match left {
+                add(&mut items, "Recording time left", match left {
                     Some(secs) => {
                         let h = (secs / 3600.0) as u32;
                         RichText::new(format!("~{h} h {:02} min at {:.1} Mbps", (secs / 60.0) as u32 % 60, kbps / 1000.0)).color(if secs < 1800.0 { theme::warn() } else { theme::text() })
@@ -311,8 +323,57 @@ pub fn stats_dock(ui: &mut egui::Ui, s: &StatsInput<'_>, cfg: &mut UiSettings, s
                     None => RichText::new("unknown"),
                 });
             }
+                let width = ui.available_width();
+        let cols = ((width + 18.0) / 380.0).floor().clamp(1.0, 3.0) as usize;
+        let per = items.len().div_ceil(cols).max(1);
+        let col_w = (width - 18.0 * (cols as f32 - 1.0)) / cols as f32;
+        ui.horizontal_top(|ui| {
+            for (c, chunk) in items.chunks(per).enumerate() {
+                ui.allocate_ui_with_layout(Vec2::new(col_w, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| {
+                    ui.set_width(col_w);
+                    egui::Grid::new(("stats_grid", c)).num_columns(2).striped(true).spacing([18.0, 4.0]).show(ui, |ui| {
+                        for (label, value) in chunk {
+                            row(ui, label, value.clone());
+                        }
+                    });
+                });
+            }
         });
-        if on("outputs") {
+        if on("outputs") && ui.available_width() < 520.0 {
+            // Narrow dock: one wrapped line per output instead of a six-column table.
+            ui.add_space(6.0);
+            crate::widgets::section_title(ui, "Outputs");
+            let out = |ui: &mut egui::Ui, name: &str, o: &ferrous_engine::OutputStatus| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(RichText::new(name).strong());
+                    let (txt, col) = if o.reconnecting && !o.active { ("Reconnecting", theme::warn()) } else if o.active { ("Live", theme::ok()) } else { ("Off", theme::muted()) };
+                    ui.colored_label(col, txt);
+                    if o.active {
+                        let total = (o.frames_written + o.frames_skipped).max(1);
+                        let pct = o.frames_skipped as f32 * 100.0 / total as f32;
+                        ui.label(crate::widgets::fmt_duration(o.elapsed));
+                        ui.label(format!("{:.0} kbps", o.bitrate_kbps));
+                        ui.colored_label(level(pct, 0.5, 2.0), format!("{} skipped ({pct:.1}%)", o.frames_skipped));
+                        if o.speed > 0.0 {
+                            ui.colored_label(if o.speed < 0.97 { theme::warn() } else { theme::text() }, format!("{:.2}x", o.speed));
+                        }
+                    }
+                });
+            };
+            out(ui, "Stream", &st.streaming);
+            out(ui, "Recording", &st.recording);
+            for (name, live, retry, kbps, skipped) in s.destinations {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(RichText::new(name).strong());
+                    ui.colored_label(if *live { theme::ok() } else { theme::warn() }, if *live { "Live" } else if *retry { "Reconnecting" } else { "Down" });
+                    ui.label(format!("{kbps:.0} kbps · {skipped} skipped"));
+                });
+            }
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new("Replay buffer").strong());
+                ui.colored_label(if s.replay_active { theme::ok() } else { theme::muted() }, if s.replay_active { "Buffering" } else { "Off" });
+            });
+        } else if on("outputs") {
             ui.add_space(6.0);
             crate::widgets::section_title(ui, "Outputs");
             egui::Grid::new("outputs_grid").num_columns(6).striped(true).spacing([12.0, 4.0]).show(ui, |ui| {
@@ -444,33 +505,58 @@ pub fn perf_dock(
         for (label, pid) in outputs {
             st.proc_cpu.entry(label.clone()).or_default().push(sys.per_pid.get(pid).map(|p| p.cpu).unwrap_or(0.0));
         }
-        st.total_cpu.push(sys.own.cpu);
-        st.total_gpu.push(sys.gpu.unwrap_or(0.0));
+        // Lightly smoothed: raw 4 Hz samples of a whole process jitter more than they inform.
+        let ease = |h: &History, v: f32| if h.0.is_empty() { v } else { h.last() * 0.6 + v * 0.4 };
+        let (cpu, gpu) = (ease(&st.total_cpu, sys.own.cpu), ease(&st.total_gpu, sys.gpu.unwrap_or(0.0)));
+        st.total_cpu.push(cpu);
+        st.total_gpu.push(gpu);
     }
-    ui.horizontal(|ui| {
+    // Everything below adapts to the dock's width: rows wrap, graphs stretch, and a narrow dock
+    // gets one compact card per source instead of the wide table.
+    let width = ui.available_width();
+    ui.horizontal_wrapped(|ui| {
         crate::widgets::dock_title(ui, "Performance Monitor");
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.toggle_value(&mut st.sort_by_cost, "Sort by cost");
-            crate::widgets::tip(ui.checkbox(&mut cfg.perf_current_scene_only, "Current scene only"), "Current scene only");
-        });
+        ui.toggle_value(&mut st.sort_by_cost, "Sort by cost");
+        crate::widgets::tip(ui.checkbox(&mut cfg.perf_current_scene_only, "Current scene only"), "Current scene only");
     });
-    ui.horizontal(|ui| {
-        let own = smooth.get("perf_own", sys.own.cpu);
-        ui.label(RichText::new(format!("Ferrous total: {:.1}% of all cores ({own:.0}% of one core)", own / sys.cores as f32)).strong())
-            .on_hover_text("Task Manager and RTSS show the first figure. A program using several cores can pass 100% of one core: 200% means two cores' worth of work.");
-        sparkline(ui, &st.total_cpu, 100.0, theme::accent(), Vec2::new(160.0, 26.0));
-        match sys.gpu {
-            Some(g) => {
-                ui.label(RichText::new(format!("System GPU: {:.0}%", smooth.get("perf_gpu", g))).strong());
-                sparkline(ui, &st.total_gpu, 100.0, theme::ok(), Vec2::new(160.0, 26.0));
+    // The two totals, each on its own row: a label of fixed width (so changing digits never move
+    // anything) and its graph filling the rest; stacked label-over-graph in a narrow dock.
+    let own = smooth.get("perf_own", sys.own.cpu);
+    let cpu_text = RichText::new(format!("Ferrous Studio total: {:.1}% of all cores ({own:.0}% of one core)", own / sys.cores.max(1) as f32)).strong();
+    let gpu_text = match sys.gpu {
+        Some(g) => RichText::new(format!("System GPU: {:.0}%", smooth.get("perf_gpu", g))).strong(),
+        None => RichText::new("System GPU: n/a").color(theme::muted()),
+    };
+    let cpu_tip = "Task Manager and RTSS show the first figure. A program using several cores can pass 100% of one core: 200% means two cores' worth of work.";
+    let label_w = 330.0;
+    let totals: [(RichText, Option<&History>, Color32, Option<&str>); 2] =
+        [(cpu_text, Some(&st.total_cpu), theme::accent(), Some(cpu_tip)), (gpu_text, sys.gpu.map(|_| &st.total_gpu), theme::ok(), None)];
+    for (text, hist, color, tip) in totals {
+        if width >= label_w + 120.0 {
+            ui.horizontal(|ui| {
+                let r = ui.allocate_ui_with_layout(Vec2::new(label_w, 26.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                    ui.set_min_width(label_w);
+                    ui.add(egui::Label::new(text).truncate())
+                });
+                if let Some(t) = tip {
+                    r.inner.on_hover_text(t);
+                }
+                if let Some(h) = hist {
+                    sparkline(ui, h, 100.0, color, Vec2::new(ui.available_width().max(60.0), 26.0));
+                }
+            });
+        } else {
+            let r = ui.add(egui::Label::new(text).wrap());
+            if let Some(t) = tip {
+                r.on_hover_text(t);
             }
-            None => {
-                ui.label(RichText::new("System GPU: n/a").color(theme::muted()));
+            if let Some(h) = hist {
+                sparkline(ui, h, 100.0, color, Vec2::new(ui.available_width().max(60.0), 22.0));
             }
         }
-    });
+    }
     ui.label(
-        RichText::new("CPU = time Ferrous spends on the source each frame (capture, decode, filters, compositing) + its helper process. GPU = share of the GPU compositing pass by area (est.) + its helper's GPU use. Screen capture's own GPU work happens inside Windows and isn't split per source.")
+        RichText::new("CPU = time Ferrous Studio spends on the source each frame (capture, decode, filters, compositing) + its helper process. GPU = share of the GPU compositing pass by area (est.) + its helper's GPU use. Screen capture's own GPU work happens inside Windows and isn't split per source.")
             .small()
             .color(theme::muted()),
     );
@@ -478,6 +564,13 @@ pub fn perf_dock(
     if st.sort_by_cost {
         order.sort_by(|a, b| st.cpu.get(&b.id).map(|h| h.last()).unwrap_or(0.0).total_cmp(&st.cpu.get(&a.id).map(|h| h.last()).unwrap_or(0.0)));
     }
+    if width < 760.0 {
+        perf_cards(ui, st, &order, outputs, sys, smooth, width);
+        ui.ctx().request_repaint_after(Duration::from_millis(250));
+        return;
+    }
+    // Wide: the full table, its graphs sharing the room left after the text columns.
+    let table_spark = ((width - 700.0) / 2.0).clamp(100.0, 260.0);
     egui::ScrollArea::vertical().id_salt("perf_scroll").show(ui, |ui| {
         egui::Grid::new("perf_grid").num_columns(7).striped(true).spacing([12.0, 4.0]).show(ui, |ui| {
             for h in ["Source", "Capture + filters", "Compositing", "Helper process", "CPU (60 s)", "GPU", "GPU (60 s)"] {
@@ -504,7 +597,7 @@ pub fn perf_dock(
                     ui.label(format!("{:.0}% of a core{} · {}", smooth.get(&format!("h{}", r.id), c), g.map(|g| format!(" · {g:.0}% GPU")).unwrap_or_default(), fmt_bytes(m)));
                 }
                 if let Some(h) = st.cpu.get(&r.id) {
-                    sparkline(ui, h, 10.0, theme::accent(), Vec2::new(120.0, 24.0));
+                    sparkline(ui, h, 10.0, theme::accent(), Vec2::new(table_spark, 24.0));
                 } else {
                     ui.label("");
                 }
@@ -521,7 +614,7 @@ pub fn perf_dock(
                     }
                 }
                 if let Some(h) = st.gpu.get(&r.id) {
-                    sparkline(ui, h, 10.0, theme::ok(), Vec2::new(120.0, 24.0));
+                    sparkline(ui, h, 10.0, theme::ok(), Vec2::new(table_spark, 24.0));
                 } else {
                     ui.label("");
                 }
@@ -537,7 +630,7 @@ pub fn perf_dock(
                 let p = sys.per_pid.get(pid).copied().unwrap_or_default();
                 ui.label(format!("{:.0}% of a core{} · {}", smooth.get(label, p.cpu), p.gpu.map(|g| format!(" · {g:.0}% GPU")).unwrap_or_default(), fmt_bytes(p.mem_bytes)));
                 if let Some(h) = st.proc_cpu.get(label) {
-                    sparkline(ui, h, 100.0, theme::accent(), Vec2::new(120.0, 24.0));
+                    sparkline(ui, h, 100.0, theme::accent(), Vec2::new(table_spark, 24.0));
                 } else {
                     ui.label("");
                 }
@@ -548,4 +641,56 @@ pub fn perf_dock(
         });
     });
     ui.ctx().request_repaint_after(Duration::from_millis(250));
+}
+
+/// The Performance Monitor in a narrow dock: one card per source (name, figures that wrap, and its
+/// CPU/GPU graphs across the full width) instead of a seven-column table that would overflow.
+fn perf_cards(ui: &mut egui::Ui, st: &PerfState, order: &[&PerfRow], outputs: &[(String, u32)], sys: &Snapshot, smooth: &mut Smooth, width: f32) {
+    let graph = Vec2::new((width - 24.0).max(60.0), 20.0);
+    egui::ScrollArea::vertical().id_salt("perf_scroll").show(ui, |ui| {
+        for r in order {
+            ui.separator();
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new(&r.name).strong());
+                ui.label(RichText::new(format!("{} · {}", r.kind, r.scene)).small().color(theme::muted()));
+            });
+            ui.horizontal_wrapped(|ui| {
+                let src = smooth.get(&format!("s{}", r.id), r.perf.source_ms);
+                let comp = smooth.get(&format!("c{}", r.id), r.perf.composite_ms);
+                ui.label(RichText::new("Capture").small().color(theme::muted()));
+                ui.colored_label(level(src, 4.0, 10.0), format!("{src:.2} ms"));
+                ui.label(RichText::new("Compositing").small().color(theme::muted()));
+                ui.colored_label(level(comp, 4.0, 10.0), format!("{comp:.2} ms"));
+                if let Some(ms) = r.perf.gpu_ms {
+                    ui.label(RichText::new("GPU").small().color(theme::muted()));
+                    ui.label(format!("{:.3} ms est.", smooth.get(&format!("g{}", r.id), ms)));
+                }
+                let helpers: Vec<_> = r.perf.pids.iter().filter_map(|p| sys.per_pid.get(p)).collect();
+                if !helpers.is_empty() {
+                    let c: f32 = helpers.iter().map(|p| p.cpu).sum();
+                    let m: u64 = helpers.iter().map(|p| p.mem_bytes).sum();
+                    ui.label(RichText::new("Helper").small().color(theme::muted()));
+                    ui.label(format!("{:.0}% of a core · {}", smooth.get(&format!("h{}", r.id), c), fmt_bytes(m)));
+                }
+            });
+            if let Some(h) = st.cpu.get(&r.id) {
+                sparkline(ui, h, 10.0, theme::accent(), graph);
+            }
+            if let Some(h) = st.gpu.get(&r.id) {
+                sparkline(ui, h, 10.0, theme::ok(), graph);
+            }
+        }
+        for (label, pid) in outputs {
+            ui.separator();
+            let p = sys.per_pid.get(pid).copied().unwrap_or_default();
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new(label).strong());
+                ui.label(RichText::new("output · FFmpeg").small().color(theme::muted()));
+                ui.label(format!("{:.0}% of a core{} · {}", smooth.get(label, p.cpu), p.gpu.map(|g| format!(" · {g:.0}% GPU")).unwrap_or_default(), fmt_bytes(p.mem_bytes)));
+            });
+            if let Some(h) = st.proc_cpu.get(label) {
+                sparkline(ui, h, 100.0, theme::accent(), graph);
+            }
+        }
+    });
 }

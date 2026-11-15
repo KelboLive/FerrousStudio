@@ -82,7 +82,7 @@ impl FerrousApp {
                 "availableRequests": REQUESTS,
                 "supportedImageFormats": [],
                 "platform": if cfg!(windows) { "windows" } else { "linux" },
-                "platformDescription": format!("Ferrous {}", env!("CARGO_PKG_VERSION")),
+                "platformDescription": format!("Ferrous Studio {}", env!("CARGO_PKG_VERSION")),
             })),
             "GetStats" => {
                 let st = self.engine.status();
@@ -292,7 +292,7 @@ impl FerrousApp {
                 }
                 Ok(Value::Null)
             }
-            _ => Err((status::UNKNOWN_REQUEST_TYPE, format!("{rt} isn't supported by Ferrous"))),
+            _ => Err((status::UNKNOWN_REQUEST_TYPE, format!("{rt} isn't supported by Ferrous Studio"))),
         }
     }
 }

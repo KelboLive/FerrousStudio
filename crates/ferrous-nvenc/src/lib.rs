@@ -159,7 +159,7 @@ impl Api {
         let driver_version = (v >> 4, v & 0xf);
         let ours = (NVENCAPI_MAJOR_VERSION, NVENCAPI_MINOR_VERSION);
         if driver_version < ours {
-            anyhow::bail!("the NVIDIA driver supports encoder API {}.{}, Ferrous needs {}.{}: update the driver", driver_version.0, driver_version.1, ours.0, ours.1);
+            anyhow::bail!("the NVIDIA driver supports encoder API {}.{}, Ferrous Studio needs {}.{}: update the driver", driver_version.0, driver_version.1, ours.0, ours.1);
         }
         // SAFETY: the list is plain data (u32s, pointers); all-zero is its documented initial state.
         let mut f: NV_ENCODE_API_FUNCTION_LIST = unsafe { std::mem::zeroed() };

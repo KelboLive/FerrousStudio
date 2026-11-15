@@ -51,12 +51,11 @@ enum Tab {
 const INDEX: &[(&str, Tab, &str)] = &[
     ("Theme and colours", Tab::General, "appearance look dark light skin"),
     ("Glass effects", Tab::General, "blur translucent transparency"),
-    ("Animated backgrounds", Tab::General, "rain stars motion animation"),
+    ("Animations", Tab::General, "rain stars motion animation fade reduce calm"),
     ("Window frame rate", Tab::General, "fps cap limit redraw refresh 60 120 144 240 gpu"),
     ("Interface size and zoom", Tab::General, "accessibility bigger smaller text scale ctrl"),
     ("High-contrast colours", Tab::General, "accessibility contrast low vision black white"),
     ("Colour-blind-friendly level meters", Tab::General, "accessibility colorblind red green hatch"),
-    ("Reduce motion", Tab::General, "accessibility animation calm fade"),
     ("Check for problems before starting", Tab::General, "preflight warning helper muted problems"),
     ("Stream service and server", Tab::Stream, "twitch youtube tiktok rtmp srt whip url"),
     ("Stream key", Tab::Stream, "password secret"),
@@ -68,16 +67,14 @@ const INDEX: &[(&str, Tab, &str)] = &[
     ("Audio tracks", Tab::Recording, "multitrack separate mic desktop"),
     ("Replay buffer", Tab::Recording, "instant replay clip save last seconds"),
     ("Recording presets and benchmark", Tab::Recording, "quality profile best settings compare test"),
-    ("Recording encoder", Tab::Recording, "nvenc quality crf hevc av1 hdr"),
-    ("HDR10 output", Tab::Recording, "hdr 10-bit bt2020 pq hevc av1"),
+    ("Recording encoder", Tab::Recording, "nvenc quality crf hevc av1"),
     ("Canvas and output resolution", Tab::Video, "base size 1080p 1440p 4k scale"),
     ("Frame rate", Tab::Video, "fps 30 60 120 144"),
     ("Renderer (GPU or CPU)", Tab::Video, "compositor gpu cpu graphics"),
     ("Vertical canvas", Tab::Video, "tiktok shorts reels 9:16 portrait"),
-    ("Color conversion", Tab::Video, "yuv nv12 ffmpeg ferrous"),
-    ("GPU readback and priority", Tab::Video, "lag latency game pipelined"),
-    ("GPU capture", Tab::Video, "gpu resident capture shared texture cpu copy"),
+    ("GPU priority", Tab::Video, "lag latency game priority"),
     ("Zero-copy encoding", Tab::Video, "nvenc gpu encoder zero copy in-process ffmpeg pipe"),
+    ("GPU preview", Tab::Video, "preview gpu shared device window copy readback experimental"),
     ("Desktop and microphone devices", Tab::Audio, "input output speaker wasapi"),
     ("Audio delay (sync offset)", Tab::Audio, "lip sync latency"),
     ("Hotkeys", Tab::Hotkeys, "shortcut keyboard keys bind"),
@@ -515,38 +512,17 @@ impl SettingsWindow {
                     ui.selectable_value(&mut v.renderer, RendererMode::Cpu, "CPU only");
                 });
             ui.end_row();
-            crate::widgets::row_label(ui, "Encoder input");
-            {
-                use ferrous_core::ConversionMode as C;
-                let label = |c: C| match c {
-                    C::Auto => "Auto",
-                    C::Ferrous => "Convert in Ferrous (multi-threaded, 62% less pipe traffic)",
-                    C::Ffmpeg => "Convert in FFmpeg (Lanczos scaler)",
-                };
-                ComboBox::from_id_salt("conversion").selected_text(label(v.conversion)).width(330.0).show_ui(ui, |ui| {
-                    for c in [C::Auto, C::Ferrous, C::Ffmpeg] {
-                        ui.selectable_value(&mut v.conversion, c, label(c));
-                    }
-                })
-                .response
-                .on_hover_text("Where the canvas is scaled to the output size and converted to the encoder's YUV format. Auto converts in Ferrous above 1080p60 (where the pipe to FFmpeg gets busy) or on 8+ core CPUs, and whenever the GPU renderer can hand over finished NV12.");
-            }
-            ui.end_row();
-            crate::widgets::row_label(ui, "GPU readback");
-            ui.checkbox(&mut v.pipelined_readback, "Pipelined (smoother frames, one frame more latency)")
-                .on_hover_text("Reads each GPU frame back one frame later, so the program never waits for the GPU (it matters most when a game is using the same GPU). It adds one frame of delay: 16 ms at 60 fps, 7 ms at 144 fps. Turn it off for the lowest latency. Studio mode and transitions always read back immediately. Takes effect on restart.");
-            ui.end_row();
             crate::widgets::row_label(ui, "GPU priority");
-            ui.checkbox(&mut v.gpu_priority, "Schedule Ferrous's GPU work ahead of other programs")
-                .on_hover_text("Helps when a game uses the whole GPU and Ferrous reports rendering lag (frames missed in the Stats dock). Works best when Ferrous runs as administrator, and with Windows Game Mode on. Takes effect on restart.");
-            ui.end_row();
-            crate::widgets::row_label(ui, "GPU capture");
-            ui.checkbox(&mut v.gpu_capture, "Keep display and game capture on the GPU (experimental)")
-                .on_hover_text("Skips the copy of every captured frame to system memory: the picture goes from the capture straight into the GPU renderer. It lowers CPU use and memory traffic, most at 1440p/4K and high frame rates. Sources that need the pixels on the CPU (plugin filters, background removal, nested scenes) use the normal path automatically, and so does everything if your graphics setup can't share textures. Needs the GPU renderer. Takes effect on restart.");
+            ui.checkbox(&mut v.gpu_priority, "Schedule Ferrous Studio's GPU work ahead of other programs")
+                .on_hover_text("Helps when a game uses the whole GPU and Ferrous Studio reports rendering lag (frames missed in the Stats dock). Works best when Ferrous Studio runs as administrator, and with Windows Game Mode on. Takes effect on restart.");
             ui.end_row();
             crate::widgets::row_label(ui, "Zero-copy encoding");
             ui.checkbox(&mut v.zero_copy_encoding, "Encode on the GPU without copying frames (NVIDIA)")
-                .on_hover_text("Recording, streaming and the replay buffer encode with NVENC inside Ferrous, straight from the picture on the graphics card, the way OBS does; FFmpeg only writes the file or sends the stream. Much less CPU and memory traffic. Used with NVIDIA encoders on the GPU renderer; anything else, or any problem starting it, uses the FFmpeg path automatically. Turn off if a recording misbehaves. Applies to the next recording or stream.");
+                .on_hover_text("Recording, streaming and the replay buffer encode with NVENC inside Ferrous Studio, straight from the picture on the graphics card, the way OBS does; FFmpeg only writes the file or sends the stream. Much less CPU and memory traffic. Used with NVIDIA encoders on the GPU renderer; anything else, or any problem starting it, uses the FFmpeg path automatically. Turn off if a recording misbehaves. Applies to the next recording or stream.");
+            ui.end_row();
+            crate::widgets::row_label(ui, "GPU preview");
+            ui.checkbox(&mut v.gpu_preview, "Show the preview straight from the GPU (experimental)")
+                .on_hover_text("The window and the renderer share one graphics device, so the preview is drawn where the window shows it and never copied to system memory, as in OBS. Turn off if the preview looks wrong or the window misbehaves. Takes effect on restart.");
             ui.end_row();
         });
         // Encoders want even dimensions for 4:2:0 chroma.
@@ -583,7 +559,7 @@ impl SettingsWindow {
     fn link_tab(&mut self, ui: &mut egui::Ui, probe: &ProbeState) {
         use ferrous_core::{LinkCodec, LinkSourceTarget};
         let link_ports = self.link_ports.clone();
-        ui.label(RichText::new("Send this PC's video and audio to another Ferrous on your network (e.g. gaming PC → streaming PC). Receivers add an \"Ferrous Link\" source.").small().color(theme::muted()));
+        ui.label(RichText::new("Send this PC's video and audio to another Ferrous Studio on your network (e.g. gaming PC → streaming PC). Receivers add an \"Ferrous Link\" source.").small().color(theme::muted()));
         let scenes = self.scenes.clone();
         let hw: Vec<String> = match probe {
             ProbeState::Done(p) => p.working.iter().filter(|e| e.codec != ferrous_encode::Codec::Av1).map(|e| e.name.to_string()).collect(),
@@ -621,22 +597,21 @@ impl SettingsWindow {
                         ui.horizontal(|ui| {
                             let is = |c: &LinkCodec, k: u8| matches!((c, k), (LinkCodec::Jpeg { .. }, 0) | (LinkCodec::Lossless, 1) | (LinkCodec::Hardware { .. }, 2));
                             if ui.selectable_label(is(&l.codec, 0), "JPEG (lowest latency)").clicked() && !is(&l.codec, 0) {
-                                l.codec = LinkCodec::Jpeg { quality: 92, adaptive: true, full_chroma: false };
+                                l.codec = LinkCodec::Jpeg { quality: 92, full_chroma: false };
                             }
                             if ui.selectable_label(is(&l.codec, 1), "Lossless + alpha").clicked() {
                                 l.codec = LinkCodec::Lossless;
                             }
                             if ui.selectable_label(is(&l.codec, 2), "Hardware (lowest bandwidth)").clicked() && !is(&l.codec, 2) {
-                                l.codec = LinkCodec::Hardware { encoder: hw.first().cloned().unwrap_or("libx264".into()), bitrate_kbps: 20_000 };
+                                l.codec = LinkCodec::Hardware { encoder: hw.first().cloned().unwrap_or("libx264".into()), bitrate_kbps: 20_000, preset: 6 };
                             }
                         });
                         ui.end_row();
                         match &mut l.codec {
-                            LinkCodec::Jpeg { quality, adaptive, full_chroma } => {
+                            LinkCodec::Jpeg { quality, full_chroma } => {
                                 crate::widgets::row_label(ui, "Quality");
                                 ui.horizontal(|ui| {
                                     ui.add(egui::Slider::new(quality, 30..=100));
-                                    ui.checkbox(adaptive, "Adapt to network");
                                     ui.checkbox(full_chroma, "Full colour detail").on_hover_text(
                                         "Keeps colour at full resolution (4:4:4): sharper coloured text, HUD and thin lines, but about twice the CPU work and more bandwidth. Off sends colour at quarter resolution, like obs-teleport.",
                                     );
@@ -650,7 +625,7 @@ impl SettingsWindow {
                                 );
                                 ui.end_row();
                             }
-                            LinkCodec::Hardware { encoder, bitrate_kbps } => {
+                            LinkCodec::Hardware { encoder, bitrate_kbps, preset } => {
                                 crate::widgets::row_label(ui, "Encoder");
                                 ui.horizontal(|ui| {
                                     ComboBox::from_id_salt("lenc").selected_text(encoder.clone()).show_ui(ui, |ui| {
@@ -660,6 +635,19 @@ impl SettingsWindow {
                                     });
                                     ui.add(DragValue::new(bitrate_kbps).range(1000..=200_000).speed(100).suffix(" kbps"));
                                 });
+                                ui.end_row();
+                                crate::widgets::row_label(ui, "Preset");
+                                ui.add_enabled_ui(encoder.contains("nvenc"), |ui| {
+                                    const NAMES: [&str; 7] = ["P1 (fastest)", "P2", "P3", "P4 (balanced)", "P5", "P6 (recommended)", "P7 (best quality)"];
+                                    let current = NAMES[(*preset).clamp(1, 7) as usize - 1];
+                                    ComboBox::from_id_salt("lpreset").selected_text(current).show_ui(ui, |ui| {
+                                        for (i, n) in NAMES.iter().enumerate() {
+                                            ui.selectable_value(preset, i as u8 + 1, *n);
+                                        }
+                                    });
+                                })
+                                .response
+                                .on_hover_text("NVENC quality preset. Higher = cleaner detail at the same bitrate. It runs on the graphics card's own video engine, so games keep their frame rate; P7 adds a little encode time.");
                                 ui.end_row();
                                 ui.label("");
                                 ui.label(
@@ -845,14 +833,14 @@ impl SettingsWindow {
             ui.label(RichText::new("Translucent panels over the theme's backdrop. Light skips the sheen; Off is flat.").small().color(theme::muted()));
         });
         ui.horizontal(|ui| {
-            crate::widgets::row_label(ui, "Animated backgrounds");
-            let names = ["Off", "Reduced (30 fps)", "Full"];
+            crate::widgets::row_label(ui, "Animations");
+            let names = ["Off", "Reduced", "Full"];
             egui::ComboBox::from_id_salt("motion").selected_text(names[usize::from(self.draft.ui.motion.min(2))]).show_ui(ui, |ui| {
                 for (i, n) in names.iter().enumerate() {
                     ui.selectable_value(&mut self.draft.ui.motion, i as u8, *n);
                 }
             });
-            ui.label(RichText::new("Rain, drifting glows, twinkling stars. Costs a little GPU; Off is fully static.").small().color(theme::muted()));
+            ui.label(RichText::new("Animated backgrounds (rain, glows, stars), fades and sliding. Reduced runs backgrounds at 30 fps; Off: nothing moves unless you move it.").small().color(theme::muted()));
         });
         ui.horizontal(|ui| {
             crate::widgets::row_label(ui, "Window frame rate");
@@ -862,7 +850,7 @@ impl SettingsWindow {
                     ui.selectable_value(&mut self.draft.ui.max_fps, v, label(v));
                 }
             });
-            ui.label(RichText::new("The most times a second Ferrous redraws its own window. It doesn't change your video's frame rate. Lower uses less GPU.").small().color(theme::muted()));
+            ui.label(RichText::new("The most times a second Ferrous Studio redraws its own window. It doesn't change your video's frame rate. Lower uses less GPU.").small().color(theme::muted()));
         });
         ui.add_space(10.0);
         crate::widgets::section_title(ui, "Accessibility");
@@ -877,7 +865,6 @@ impl SettingsWindow {
         ui.label(RichText::new("Makes text, buttons and everything else bigger or smaller. Ctrl + / Ctrl − / Ctrl 0 work anywhere.").small().color(theme::muted()));
         ui.checkbox(&mut self.draft.ui.high_contrast, "High-contrast colours").on_hover_text("Black background, white text and strong outlines. Easier on tired or low-vision eyes.");
         ui.checkbox(&mut self.draft.ui.meter_patterns, "Colour-blind-friendly level meters").on_hover_text("Meters get a hatched pattern in the loud zones and a palette that doesn't rely on red versus green.");
-        ui.checkbox(&mut self.draft.ui.reduce_motion, "Reduce motion").on_hover_text("Turns off animated backgrounds, fades and sliding. Nothing moves unless you move it.");
         ui.add_space(6.0);
         crate::widgets::section_title(ui, "Helpers");
         ui.checkbox(&mut self.draft.ui.preflight, "Check for problems before recording or streaming").on_hover_text("Looks for a missing stream key, a muted microphone, a full drive and similar, and offers a one-click fix.");
@@ -891,7 +878,7 @@ impl SettingsWindow {
             ui.horizontal(|ui| {
                 ui.add(
                     egui::TextEdit::singleline(&mut self.draft.ffmpeg_path)
-                        .hint_text("auto: next to ferrous.exe, then PATH")
+                        .hint_text("auto: next to Ferrous Studio.exe, then PATH")
                         .desired_width(330.0),
                 );
                 if ui.button("Browse…").clicked() {
@@ -914,7 +901,7 @@ impl SettingsWindow {
             ui.toggle_value(&mut self.show_key, "Show");
         });
         if r.enabled && r.password.is_empty() {
-            ui.colored_label(theme::warn(), "Without a password anyone on your network can control Ferrous.");
+            ui.colored_label(theme::warn(), "Without a password anyone on your network can control Ferrous Studio.");
         }
         ui.label(
             RichText::new("Works with tools built for OBS WebSocket 5: Stream Deck, Touch Portal, Streamer.bot, TikFinity and others.")
@@ -925,7 +912,7 @@ impl SettingsWindow {
         crate::widgets::section_title(ui, "Plugins");
         let plugins = ferrous_plugins::list();
         if plugins.is_empty() {
-            ui.label(RichText::new("No plugins installed. Put plugin DLLs in %APPDATA%\\Ferrous\\plugins.").small().color(theme::muted()));
+            ui.label(RichText::new("No plugins installed. Put plugin DLLs in %APPDATA%\\Ferrous Studio\\plugins.").small().color(theme::muted()));
         }
         for (id, name, kind) in plugins {
             ui.label(format!("{name}  ({id}, {kind:?})"));
@@ -1088,18 +1075,6 @@ pub fn encoder_editor(ui: &mut egui::Ui, id: &str, e: &mut EncoderSettings, prob
         ui.label(RichText::new(hint).small().color(theme::muted()));
         ui.end_row();
 
-        crate::widgets::row_label(ui, "HDR10");
-        let can = ferrous_encode::args::supports_hdr(&e.encoder);
-        ui.horizontal(|ui| {
-            ui.add_enabled(can, egui::Checkbox::new(&mut e.hdr, "Output HDR10 (10-bit, BT.2020, PQ)"))
-                .on_hover_text("Encodes 10-bit HDR10. Your SDR sources are mapped into HDR with white at the level on the right, so they look as they do now on an HDR display; true HDR capture is not in yet. Needs an HEVC or AV1 encoder and a player that understands HDR; most live services don't accept it. Recordings only, in practice.")
-                .on_disabled_hover_text("HDR10 needs an HEVC or AV1 encoder (H.264 is 8-bit).");
-            if e.hdr && can {
-                ui.add(DragValue::new(&mut e.hdr_white_nits).range(80..=400).suffix(" nits"))
-                    .on_hover_text("Brightness of SDR white inside the HDR picture. 203 is the broadcast reference; raise it if the result looks dim.");
-            }
-        });
-        ui.end_row();
     });
     egui::CollapsingHeader::new(RichText::new("Advanced options").small().color(theme::muted()))
         .id_salt((id, "adv"))
@@ -1146,7 +1121,6 @@ mod search_tests {
         assert_eq!(names("stream key"), vec!["Stream key"]);
         assert!(names("zzzz").is_empty() && names("   ").is_empty());
         // The tab name counts too.
-        assert!(names("recording hdr").contains(&"HDR10 output"));
     }
 
     #[test]

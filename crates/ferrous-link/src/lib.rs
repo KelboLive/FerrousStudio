@@ -6,7 +6,6 @@
 //! - per-link codec: parallel JPEG (lowest latency), lossless LZ4 delta
 //!   (keeps alpha, ideal for overlays), or hardware H.264/HEVC via FFmpeg
 //!   (lowest bandwidth)
-//! - adaptive quality: JPEG quality backs off when a receiver can't keep up
 //! - send the program output, any scene, or a single source
 //! - per-link resolution, frame rate and audio-track choice
 //! - optional pairing PIN, which also encrypts the link (ChaCha20-Poly1305)

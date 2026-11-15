@@ -42,19 +42,8 @@ pub struct EncoderSettings {
     /// Extra raw FFmpeg arguments appended after the generated ones.
     #[serde(default)]
     pub custom_args: String,
-    /// Output HDR10 (10-bit, BT.2020, PQ). Only takes effect with HEVC or
-    /// AV1 encoders; SDR sources are mapped with SDR white at
-    /// `hdr_white_nits`.
-    #[serde(default)]
-    pub hdr: bool,
-    /// Where SDR white lands in HDR output (203 is the broadcast reference).
-    #[serde(default = "default_white")]
-    pub hdr_white_nits: u32,
 }
 
-fn default_white() -> u32 {
-    203
-}
 
 impl Default for EncoderSettings {
     fn default() -> Self {
@@ -73,8 +62,6 @@ impl EncoderSettings {
             keyframe_interval_secs: 2,
             b_frames: 2,
             custom_args: String::new(),
-            hdr: false,
-            hdr_white_nits: 203,
         }
     }
 
@@ -175,27 +162,23 @@ pub struct VideoSettings {
     /// Second canvas for vertical platforms (TikTok, Shorts, Reels). `None` = off.
     #[serde(default)]
     pub vertical: Option<(u32, u32)>,
-    /// Where the canvas is scaled and converted to the encoder's YUV format.
-    #[serde(default)]
+    /// Where the canvas is converted for FFmpeg encoders: always decided automatically (no longer a
+    /// setting); tests force one side to compare them.
+    #[serde(skip)]
     pub conversion: ConversionMode,
-    /// Read GPU results a frame late instead of waiting for them: smoother
-    /// frame times, one frame (16 ms at 60 fps) more latency.
-    #[serde(default = "yes")]
-    pub pipelined_readback: bool,
     /// Ask Windows to schedule Ferrous's GPU work ahead of other programs'
     /// (a game's), which cuts rendering lag when the game maxes the GPU.
     /// Works best when Ferrous runs as administrator. On by default, as in OBS.
     #[serde(default = "yes")]
     pub gpu_priority: bool,
-    /// Windows capture keeps the picture on the GPU (shared texture) instead of copying every frame
-    /// to the CPU; the GPU compositor draws it directly. Experimental; Ferrous falls back to the CPU
-    /// copy by itself when it can't.
-    #[serde(default)]
-    pub gpu_capture: bool,
     /// NVIDIA encoders run inside Ferrous, fed straight from the canvas on the GPU (as in OBS);
     /// FFmpeg only writes the file or sends the stream. Falls back by itself when unavailable.
     #[serde(default = "yes")]
     pub zero_copy_encoding: bool,
+    /// The compositor draws on the window's own GPU device and the window shows the preview straight
+    /// from it (as OBS does), with nothing copied to the CPU. Experimental; takes effect on restart.
+    #[serde(default)]
+    pub gpu_preview: bool,
 }
 
 fn yes() -> bool {
@@ -227,8 +210,7 @@ impl Default for VideoSettings {
             renderer: RendererMode::Auto,
             vertical: None,
             conversion: ConversionMode::Auto,
-            pipelined_readback: true,
-            gpu_priority: true, gpu_capture: false, zero_copy_encoding: true,
+            gpu_priority: true, zero_copy_encoding: true, gpu_preview: false,
         }
     }
 }
@@ -525,8 +507,6 @@ pub struct UiSettings {
     pub layout: Option<String>,
     /// Layouts the user saved by name.
     pub saved_layouts: std::collections::BTreeMap<String, String>,
-    /// How drop targets are shown while dragging a dock.
-    pub snap_guides: SnapGuides,
     /// Docks can't be dragged, closed or resized by accident.
     pub lock_layout: bool,
     /// Audio Mixer in OBS's vertical layout (strips side by side).
@@ -558,7 +538,8 @@ pub struct UiSettings {
     pub high_contrast: bool,
     /// Meters add hatching and a colour-blind-safe palette to the colours.
     pub meter_patterns: bool,
-    /// No animations anywhere (backgrounds, fades, meter smoothing).
+    /// Old "Reduce motion" switch, now part of `motion` (Off): read once from older settings.
+    #[serde(default, skip_serializing)]
     pub reduce_motion: bool,
     /// The first-run tour has been finished or skipped.
     pub tour_done: bool,
@@ -579,38 +560,37 @@ pub struct CustomDock {
     pub url: String,
 }
 
-/// How drop targets are shown while dragging a dock.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
-pub enum SnapGuides {
-    /// The half of the panel the dock would take lights up as you approach an edge.
-    #[default]
-    Zones,
-    /// A compass of drop buttons appears in the panel under the pointer (Visual Studio style).
-    Compass,
-}
 
 impl Default for UiSettings {
     fn default() -> Self {
-        Self { docks: Default::default(), hidden_stats: Vec::new(), recent_sources: Vec::new(), perf_current_scene_only: false, setup_done: false, layout: None, saved_layouts: Default::default(), snap_guides: SnapGuides::Zones, lock_layout: false, mixer_vertical: false, custom_docks: Vec::new(), preview_enabled: true, preview_max_fps: 0, layout_rev: 0, theme: "ember".into(), glass: 2, motion: 1, simple_mode: true, advanced_layout: None, ui_scale: 1.0, high_contrast: false, meter_patterns: false, reduce_motion: false, tour_done: false, preflight: true, max_fps: 60 }
+        Self { docks: Default::default(), hidden_stats: Vec::new(), recent_sources: Vec::new(), perf_current_scene_only: false, setup_done: false, layout: None, saved_layouts: Default::default(), lock_layout: false, mixer_vertical: false, custom_docks: Vec::new(), preview_enabled: true, preview_max_fps: 0, layout_rev: 0, theme: "ember".into(), glass: 2, motion: 1, simple_mode: true, advanced_layout: None, ui_scale: 1.0, high_contrast: false, meter_patterns: false, reduce_motion: false, tour_done: false, preflight: true, max_fps: 60 }
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "codec", rename_all = "snake_case")]
 pub enum LinkCodec {
-    /// Parallel JPEG: lowest latency, moderate bandwidth. `adaptive` lowers
-    /// quality automatically when a receiver can't keep up. `full_chroma` keeps colour at full resolution
+    /// Parallel JPEG: lowest latency, moderate bandwidth. `full_chroma` keeps colour at full resolution
     /// (4:4:4: sharper coloured text and HUD edges, about twice the encode work); off sends 4:2:0 like obs-teleport.
     Jpeg {
         quality: u8,
-        adaptive: bool,
         #[serde(default)]
         full_chroma: bool,
     },
     /// Exact pixels including alpha (LZ4 + frame deltas): best for overlays.
     Lossless,
     /// FFmpeg encoder (e.g. h264_nvenc): lowest bandwidth, a little more latency.
-    Hardware { encoder: String, bitrate_kbps: u32 },
+    Hardware {
+        encoder: String,
+        bitrate_kbps: u32,
+        /// NVENC preset 1 (fastest) to 7 (best quality); other encoders ignore it.
+        #[serde(default = "default_link_preset")]
+        preset: u8,
+    },
+}
+
+fn default_link_preset() -> u8 {
+    6
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -649,7 +629,7 @@ impl Default for LinkOutputSettings {
             enabled: false,
             name: "Ferrous Link".into(),
             target: LinkSourceTarget::Program,
-            codec: LinkCodec::Jpeg { quality: 92, adaptive: true, full_chroma: false },
+            codec: LinkCodec::Jpeg { quality: 92, full_chroma: false },
             width: 0,
             height: 0,
             fps: 0,
@@ -716,12 +696,15 @@ impl Settings {
         u.ui_scale = if u.ui_scale.is_finite() { u.ui_scale.clamp(0.8, 2.0) } else { 1.0 };
         u.glass = u.glass.min(2);
         u.motion = u.motion.min(2);
+        // "Reduce motion" was its own switch; it is now Animations: Off.
+        if std::mem::take(&mut u.reduce_motion) {
+            u.motion = 0;
+        }
         u.max_fps = if u.max_fps == 0 { 0 } else { u.max_fps.clamp(15, 480) };
         for e in [&mut self.stream.encoder, &mut self.record.encoder] {
             e.bitrate_kbps = e.bitrate_kbps.clamp(100, 500_000);
             e.keyframe_interval_secs = e.keyframe_interval_secs.clamp(1, 20);
             e.b_frames = e.b_frames.min(8);
-            e.hdr_white_nits = e.hdr_white_nits.clamp(50, 1000);
         }
     }
 

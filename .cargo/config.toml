@@ -1,0 +1,4 @@
+# Release builds carry the C runtime inside the exe and DLLs, so Ferrous Studio runs on a clean
+# Windows install without the Visual C++ Redistributable.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

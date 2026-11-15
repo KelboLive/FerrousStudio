@@ -108,7 +108,7 @@ pub struct LinkReceiver {
 /// (default port), or `host:port`.
 fn resolve(target: &str) -> Option<String> {
     let t = target.trim();
-    if let Some(a) = discovery::discovered().into_iter().find(|a| a.name == t) {
+    if let Some(a) = discovery::discovered().into_iter().find(|a| discovery::names_match(a, t)) {
         return Some(a.address());
     }
     if let Some(addr) = discovery::last_known_address(t) {
@@ -220,7 +220,7 @@ impl Drop for StopOnDrop {
 
 /// Feeds an FFmpeg decoder for byte-stream (hardware codec) links. FFmpeg
 /// decodes on the GPU where it can and hands back NV12 (1.5 bytes per pixel
-/// through the pipe instead of 4), which Ferrous converts on all cores.
+/// through the pipe instead of 4), which Ferrous Studio converts on all cores.
 struct StreamDecoder {
     child: Child,
     stdin: ChildStdin,
@@ -242,7 +242,8 @@ impl StreamDecoder {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
-            .spawn()?;
+            .spawn()
+            .map_err(|e| anyhow::anyhow!("couldn't start FFmpeg ({}) to decode the hardware stream: {e}. Set the FFmpeg path in Settings, or keep the ffmpeg folder next to Ferrous.exe.", ffmpeg.display()))?;
         let stdin = child.stdin.take().unwrap();
         let mut stdout = child.stdout.take().unwrap();
         thread::Builder::new().name("link-stream-dec".into()).spawn(move || {
@@ -385,7 +386,7 @@ fn session(
     let hello: Hello = serde_json::from_slice(&protocol::read_raw(&mut reader)?)?;
     if hello.proto != protocol::PROTO_VERSION {
         anyhow::bail!(
-            "\"{}\" runs a different Ferrous version (link protocol {}, this one speaks {}). Install the same build on both PCs.",
+            "\"{}\" runs a different Ferrous Studio version (link protocol {}, this one speaks {}). Install the same build on both PCs.",
             hello.name,
             hello.proto,
             protocol::PROTO_VERSION
@@ -625,6 +626,26 @@ mod hostile_input_tests {
 #[cfg(test)]
 mod resolve_tests {
     use super::*;
+
+    #[test]
+    fn names_match_ignoring_case_spaces_and_by_computer_name() {
+        let a = crate::discovery::Announcement {
+            ember_link: 1,
+            id: "x".into(),
+            name: "Gaming PC ".into(),
+            port: 47778,
+            codec: crate::protocol::CodecKind::Jpeg,
+            width: 1,
+            height: 1,
+            fps: 60,
+            encrypted: false,
+            host: "192.168.1.20".into(),
+            computer: "KELBOSGAMINGPC".into(),
+        };
+        use crate::discovery::names_match;
+        assert!(names_match(&a, "Gaming PC") && names_match(&a, " gaming pc ") && names_match(&a, "kelbosgamingpc"));
+        assert!(!names_match(&a, "Stream PC") && !names_match(&a, "  "));
+    }
 
     #[test]
     fn display_names_wait_instead_of_dns_lookup() {

@@ -71,7 +71,7 @@ pub struct Camera {
 unsafe impl Send for Camera {}
 
 impl Camera {
-    /// Registers "Ferrous Virtual Camera" for this session and starts
+    /// Registers "Ferrous Studio Virtual Camera" for this session and starts
     /// it (Windows 11). Needs the camera source installed (see [`install`]).
     pub fn start() -> anyhow::Result<Camera> {
         unsafe {

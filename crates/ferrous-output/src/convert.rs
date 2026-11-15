@@ -15,11 +15,6 @@ pub enum YuvLayout {
     Nv12,
     /// Y plane, U plane, V plane (U and V at half resolution).
     I420,
-    /// HDR10: 10-bit NV12 (16-bit little-endian words, value in the high
-    /// 10 bits), BT.2020 primaries, PQ transfer. Hardware encoders.
-    P010,
-    /// HDR10: planar 10-bit (value in the low 10 bits). Software encoders.
-    I420P10,
 }
 
 impl YuvLayout {
@@ -27,89 +22,12 @@ impl YuvLayout {
         match self {
             YuvLayout::Nv12 => "nv12",
             YuvLayout::I420 => "yuv420p",
-            YuvLayout::P010 => "p010le",
-            YuvLayout::I420P10 => "yuv420p10le",
         }
-    }
-
-    /// HDR10 layouts: 10 bits per sample, BT.2020 + PQ.
-    pub fn is_hdr(self) -> bool {
-        matches!(self, YuvLayout::P010 | YuvLayout::I420P10)
     }
 }
 
 pub fn frame_bytes(w: u32, h: u32) -> usize {
     (w * h + 2 * (w / 2) * (h / 2)) as usize
-}
-
-/// SDR reference white, in nits, that HDR10 output maps sRGB white to
-/// (ITU-R BT.2408 recommends 203).
-pub const DEFAULT_SDR_WHITE_NITS: f32 = 203.0;
-
-/// SDR -> HDR10 lookup tables: sRGB code -> linear light, linear light ->
-/// PQ code. Built once per converter.
-struct HdrTables {
-    /// sRGB byte -> linear (0..1).
-    linear: [f32; 256],
-    /// Linear light as a fraction of the SDR white -> PQ signal, sampled.
-    pq: Vec<f32>,
-    /// How many `pq` steps span linear 0..1.
-    pq_scale: f32,
-}
-
-/// Linear values above SDR white (negative-free, but wide-gamut matrix
-/// output can exceed 1.0 a little) are looked up up to this multiple.
-const PQ_HEADROOM: f32 = 1.25;
-const PQ_STEPS: usize = 16384;
-
-/// SMPTE ST 2084 inverse EOTF: absolute luminance / 10 000 -> signal.
-pub fn pq_encode(l: f32) -> f32 {
-    const M1: f32 = 0.159_301_76;
-    const M2: f32 = 78.84375;
-    const C1: f32 = 0.8359375;
-    const C2: f32 = 18.851_563;
-    const C3: f32 = 18.6875;
-    let p = l.max(0.0).powf(M1);
-    ((C1 + C2 * p) / (1.0 + C3 * p)).powf(M2)
-}
-
-fn srgb_to_linear(v: f32) -> f32 {
-    if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
-}
-
-impl HdrTables {
-    fn new(white_nits: f32) -> Self {
-        let white = white_nits.clamp(80.0, 1000.0) / 10000.0;
-        let linear = std::array::from_fn(|i| srgb_to_linear(i as f32 / 255.0));
-        let pq_scale = (PQ_STEPS - 1) as f32 / PQ_HEADROOM;
-        let pq = (0..PQ_STEPS).map(|i| pq_encode(i as f32 / pq_scale * white)).collect();
-        Self { linear, pq, pq_scale }
-    }
-
-    /// 8-bit sRGB RGB -> PQ-encoded BT.2020 R'G'B' (each 0..1).
-    #[inline(always)]
-    fn rgb(&self, r: i32, g: i32, b: i32) -> [f32; 3] {
-        let (r, g, b) = (self.linear[r.clamp(0, 255) as usize], self.linear[g.clamp(0, 255) as usize], self.linear[b.clamp(0, 255) as usize]);
-        // BT.709 -> BT.2020 primaries (ITU-R BT.2087).
-        let r2 = 0.6274 * r + 0.3293 * g + 0.0433 * b;
-        let g2 = 0.0691 * r + 0.9195 * g + 0.0114 * b;
-        let b2 = 0.0164 * r + 0.0880 * g + 0.8956 * b;
-        let look = |l: f32| self.pq[((l * self.pq_scale) as usize).min(PQ_STEPS - 1)];
-        [look(r2), look(g2), look(b2)]
-    }
-}
-
-/// BT.2020 non-constant-luminance, limited range, 10-bit code values.
-#[inline(always)]
-fn ycc10(p: [f32; 3]) -> u16 {
-    ((64.0 + 876.0 * (0.2627 * p[0] + 0.678 * p[1] + 0.0593 * p[2])) + 0.5) as u16
-}
-#[inline(always)]
-fn cbcr10(p: [f32; 3]) -> (u16, u16) {
-    let y = 0.2627 * p[0] + 0.678 * p[1] + 0.0593 * p[2];
-    let cb = (p[2] - y) / 1.8814;
-    let cr = (p[0] - y) / 1.4746;
-    (((512.0 + 896.0 * cb) + 0.5).clamp(64.0, 960.0) as u16, ((512.0 + 896.0 * cr) + 0.5).clamp(64.0, 960.0) as u16)
 }
 
 /// Separable resampling weights for one axis (a triangle filter widened by
@@ -172,18 +90,11 @@ pub struct Converter {
     layout: YuvLayout,
     x: Option<Axis>,
     y: Option<Axis>,
-    hdr: Option<HdrTables>,
 }
 
 impl Converter {
     /// `dst` is rounded down to even dimensions (4:2:0 needs them).
     pub fn new(src: (u32, u32), dst: (u32, u32), layout: YuvLayout) -> Self {
-        Self::with_white(src, dst, layout, DEFAULT_SDR_WHITE_NITS)
-    }
-
-    /// Like [`Self::new`]; `white_nits` is where SDR white lands in the
-    /// HDR layouts (ignored for SDR ones).
-    pub fn with_white(src: (u32, u32), dst: (u32, u32), layout: YuvLayout, white_nits: f32) -> Self {
         let dst = ((dst.0 & !1).max(2), (dst.1 & !1).max(2));
         let same = src == dst;
         Self {
@@ -192,7 +103,6 @@ impl Converter {
             layout,
             x: (!same).then(|| Axis::new(src.0 as usize, dst.0 as usize)),
             y: (!same).then(|| Axis::new(src.1 as usize, dst.1 as usize)),
-            hdr: layout.is_hdr().then(|| HdrTables::new(white_nits)),
         }
     }
 
@@ -215,7 +125,7 @@ impl Converter {
     }
 
     pub fn output_bytes(&self) -> usize {
-        frame_bytes(self.dst.0, self.dst.1) * if self.layout.is_hdr() { 2 } else { 1 }
+        frame_bytes(self.dst.0, self.dst.1)
     }
 
     /// Converts a BGRA frame into `out` (resized to [`Self::output_bytes`]).
@@ -226,10 +136,6 @@ impl Converter {
         if bgra.len() != sw * sh * 4 {
             // E.g. a GPU-resident frame with no CPU pixels: drop the picture instead of panicking.
             log::warn!("convert: input is {} bytes, expected {sw}x{sh} BGRA; frame skipped", bgra.len());
-            return;
-        }
-        if self.hdr.is_some() {
-            self.convert_hdr(bgra, out);
             return;
         }
         let (y_plane, chroma) = out.split_at_mut(dw * dh);
@@ -265,7 +171,6 @@ impl Converter {
                             });
                         });
                 }
-                YuvLayout::P010 | YuvLayout::I420P10 => unreachable!("HDR layouts go through convert_hdr"),
             }
             return;
         }
@@ -296,63 +201,6 @@ impl Converter {
                         }
                     });
             }
-            YuvLayout::P010 | YuvLayout::I420P10 => unreachable!("HDR layouts go through convert_hdr"),
-        }
-    }
-
-    /// SDR BGRA -> 10-bit HDR10 (BT.2020, PQ, limited range).
-    fn convert_hdr(&self, bgra: &[u8], out: &mut [u8]) {
-        let Some(t) = self.hdr.as_ref() else { return };
-        let sw = self.src.0 as usize;
-        let (dw, dh) = (self.dst.0 as usize, self.dst.1 as usize);
-        let (cw, ch) = (dw / 2, dh / 2);
-        let semi = self.layout == YuvLayout::P010;
-        // P010 keeps its 10 bits in the high end of each word.
-        let put = move |dst: &mut [u8], v: u16| {
-            let w = if semi { v << 6 } else { v };
-            dst.copy_from_slice(&w.to_le_bytes());
-        };
-        let (y_plane, chroma) = out.split_at_mut(dw * dh * 2);
-        let init = || ([vec![0i32; dw * 3], vec![0i32; dw * 3]], vec![0i32; sw * 3], vec![[0f32; 3]; dw * 2]);
-        let work = |(rgb, tmp, pix): &mut ([Vec<i32>; 2], Vec<i32>, Vec<[f32; 3]>), pair: usize, yr: &mut [u8], mut chroma_out: Box<dyn FnMut(usize, u16, u16) + '_>| {
-            for k in 0..2 {
-                self.resample_row(bgra, sw, pair * 2 + k, &mut rgb[k], tmp);
-                for x in 0..dw {
-                    let p = t.rgb(rgb[k][x * 3], rgb[k][x * 3 + 1], rgb[k][x * 3 + 2]);
-                    pix[k * dw + x] = p;
-                    let o = (k * dw + x) * 2;
-                    put(&mut yr[o..o + 2], ycc10(p));
-                }
-            }
-            for cx in 0..cw {
-                let mut a = [0f32; 3];
-                for (k, dx) in [(0, 0), (0, 1), (1, 0), (1, 1)] {
-                    let p = pix[k * dw + cx * 2 + dx];
-                    a.iter_mut().zip(p).for_each(|(s, v)| *s += v * 0.25);
-                }
-                let (u, v) = cbcr10(a);
-                chroma_out(cx, u, v);
-            }
-        };
-        if semi {
-            y_plane.par_chunks_exact_mut(dw * 4).zip(chroma.par_chunks_exact_mut(cw * 4)).enumerate().for_each_init(init, |st, (pair, (yr, uv))| {
-                work(st, pair, yr, Box::new(|cx, u, v| {
-                    put(&mut uv[cx * 4..cx * 4 + 2], u);
-                    put(&mut uv[cx * 4 + 2..cx * 4 + 4], v);
-                }));
-            });
-        } else {
-            let (u_plane, v_plane) = chroma.split_at_mut(cw * ch * 2);
-            y_plane
-                .par_chunks_exact_mut(dw * 4)
-                .zip(u_plane.par_chunks_exact_mut(cw * 2).zip(v_plane.par_chunks_exact_mut(cw * 2)))
-                .enumerate()
-                .for_each_init(init, |st, (pair, (yr, (ur, vr)))| {
-                    work(st, pair, yr, Box::new(|cx, u, v| {
-                        put(&mut ur[cx * 2..cx * 2 + 2], u);
-                        put(&mut vr[cx * 2..cx * 2 + 2], v);
-                    }));
-                });
         }
     }
 
@@ -445,51 +293,6 @@ fn avg4(rgb: &[Vec<i32>; 2], cx: usize) -> (i32, i32, i32) {
 
 #[cfg(test)]
 mod tests {
-    fn word(b: &[u8], i: usize) -> u16 {
-        u16::from_le_bytes([b[i * 2], b[i * 2 + 1]])
-    }
-
-    #[test]
-    fn pq_matches_the_standard_at_known_points() {
-        assert!(super::pq_encode(0.0).abs() < 1e-6);
-        assert!((super::pq_encode(1.0) - 1.0).abs() < 1e-4);
-        // 100 nits is 0.508 on the PQ curve; 203 nits is about 0.581.
-        assert!((super::pq_encode(0.01) - 0.508).abs() < 2e-3);
-        assert!((super::pq_encode(0.0203) - 0.581).abs() < 3e-3);
-    }
-
-    #[test]
-    fn hdr_white_and_black_land_on_the_right_codes() {
-        use super::{Converter, YuvLayout};
-        for layout in [YuvLayout::P010, YuvLayout::I420P10] {
-            let c = Converter::new((4, 4), (4, 4), layout);
-            assert_eq!(c.output_bytes(), 48);
-            let mut out = Vec::new();
-            c.convert(&[255u8; 4 * 4 * 4], &mut out);
-            assert_eq!(out.len(), c.output_bytes());
-            let shift = if layout == YuvLayout::P010 { 6 } else { 0 };
-            let y = word(&out, 0) >> shift;
-            // 203 nits in PQ is about 0.581 -> 64 + 876 * 0.581 = 573.
-            assert!((565..=581).contains(&y), "white Y {y}");
-            let u = word(&out, 16) >> shift;
-            assert!((510..=514).contains(&u), "neutral chroma {u}");
-            let mut out = Vec::new();
-            c.convert(&[0u8; 4 * 4 * 4], &mut out);
-            assert_eq!(word(&out, 0) >> shift, 64);
-        }
-    }
-
-    #[test]
-    fn hdr_conversion_scales_like_the_sdr_one() {
-        use super::{Converter, YuvLayout};
-        let c = Converter::new((8, 8), (4, 4), YuvLayout::P010);
-        let mut out = Vec::new();
-        c.convert(&[128u8; 8 * 8 * 4], &mut out);
-        assert_eq!(out.len(), c.output_bytes());
-        let y = word(&out, 0) >> 6;
-        assert!(y > 64 && y < 573, "{y}");
-    }
-
     /// The GPU compositor's NV12 must be what this converter would make.
     #[test]
     fn gpu_nv12_agrees_with_the_cpu_converter() {

@@ -27,7 +27,7 @@ impl ObsPluginSource {
             anyhow::bail!("OBS Studio isn't installed (OBS plugin sources run on its libobs)");
         }
         if !ferrous_obs::host_path().exists() {
-            anyhow::bail!("ferrous-obs-host is missing next to Ferrous");
+            anyhow::bail!("ferrous-obs-host is missing next to Ferrous Studio");
         }
         let state = Arc::new(Mutex::new(State::Starting));
         let (st, type_id, settings) = (state.clone(), type_id.to_string(), settings.to_string());

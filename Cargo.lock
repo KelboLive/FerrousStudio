@@ -1778,7 +1778,7 @@ checksum = "b97b65636e5b9ef369943878ac74335ba1c55c1cb6adbf1e2c293c624248d693"
 
 [[package]]
 name = "ferrous"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "crossbeam-channel",
@@ -1802,6 +1802,7 @@ dependencies = [
  "ferrous-vcam",
  "ferrous-vst3",
  "global-hotkey",
+ "image",
  "log",
  "parking_lot 0.12.5",
  "rfd",
@@ -1814,7 +1815,7 @@ dependencies = [
 
 [[package]]
 name = "ferrous-audio"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "cpal",
@@ -1829,7 +1830,7 @@ dependencies = [
 
 [[package]]
 name = "ferrous-bench"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "ferrous-core",
@@ -1842,7 +1843,7 @@ dependencies = [
 
 [[package]]
 name = "ferrous-capture"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -1865,7 +1866,7 @@ dependencies = [
 
 [[package]]
 name = "ferrous-core"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "dirs 6.0.0",
@@ -1876,7 +1877,7 @@ dependencies = [
 
 [[package]]
 name = "ferrous-encode"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "ferrous-core",
@@ -1885,7 +1886,7 @@ dependencies = [
 
 [[package]]
 name = "ferrous-engine"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "crossbeam-channel",
@@ -1908,7 +1909,7 @@ dependencies = [
 
 [[package]]
 name = "ferrous-example-plugin"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "ferrous-plugin-api",
  "serde_json",
@@ -1916,7 +1917,7 @@ dependencies = [
 
 [[package]]
 name = "ferrous-link"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "chacha20poly1305",
@@ -1939,7 +1940,7 @@ dependencies = [
 
 [[package]]
 name = "ferrous-matte"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "image",
@@ -1960,7 +1961,7 @@ dependencies = [
 
 [[package]]
 name = "ferrous-obs"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "ferrous-core",
@@ -1972,7 +1973,7 @@ dependencies = [
 
 [[package]]
 name = "ferrous-obs-host"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "ferrous-obs",
@@ -1982,7 +1983,7 @@ dependencies = [
 
 [[package]]
 name = "ferrous-output"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1997,11 +1998,11 @@ dependencies = [
 
 [[package]]
 name = "ferrous-plugin-api"
-version = "0.1.0"
+version = "1.0.0"
 
 [[package]]
 name = "ferrous-plugins"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "ferrous-core",
@@ -2013,7 +2014,7 @@ dependencies = [
 
 [[package]]
 name = "ferrous-remote"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -2027,7 +2028,7 @@ dependencies = [
 
 [[package]]
 name = "ferrous-render"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -2046,7 +2047,7 @@ dependencies = [
 
 [[package]]
 name = "ferrous-sysmon"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "libloading",
  "log",
@@ -2057,7 +2058,7 @@ dependencies = [
 
 [[package]]
 name = "ferrous-vcam"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "memmap2",
@@ -2066,7 +2067,7 @@ dependencies = [
 
 [[package]]
 name = "ferrous-vcam-source"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "ferrous-vcam",
  "windows 0.62.2",
@@ -2075,7 +2076,7 @@ dependencies = [
 
 [[package]]
 name = "ferrous-vst3"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -5751,7 +5752,7 @@ dependencies = [
 
 [[package]]
 name = "vst3-test-gain"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "vst3",
 ]

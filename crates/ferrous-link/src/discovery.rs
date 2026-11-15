@@ -30,6 +30,22 @@ pub struct Announcement {
     /// Filled in by the receiver from the packet's source address.
     #[serde(default)]
     pub host: String,
+    /// The sending PC's Windows computer name, so a receiver can be pointed at that as well as at
+    /// the Link's own name. Empty from older senders.
+    #[serde(default)]
+    pub computer: String,
+}
+
+/// This PC's computer name (as Windows shows it), or empty if unknown.
+pub fn computer_name() -> String {
+    std::env::var("COMPUTERNAME").or_else(|_| std::env::var("HOSTNAME")).unwrap_or_default().trim().to_string()
+}
+
+/// Whether `typed` names this sender: its Link name or its computer name, ignoring case and
+/// surrounding spaces (a name saved as "Gaming PC " used to need the trailing space typed too).
+pub fn names_match(a: &Announcement, typed: &str) -> bool {
+    let t = typed.trim();
+    !t.is_empty() && (a.name.trim().eq_ignore_ascii_case(t) || (!a.computer.is_empty() && a.computer.eq_ignore_ascii_case(t)))
 }
 
 impl Announcement {
@@ -134,7 +150,7 @@ fn last_known() -> &'static Mutex<HashMap<String, String>> {
 
 /// Where a sender with this name was last heard from, if ever.
 pub fn last_known_address(name: &str) -> Option<String> {
-    last_known().lock().get(name).cloned()
+    last_known().lock().get(&name.trim().to_ascii_lowercase()).cloned()
 }
 
 fn seen() -> &'static Mutex<Seen> {
@@ -176,7 +192,14 @@ fn seen() -> &'static Mutex<Seen> {
                         let mut s = seen().lock();
                         let keep_existing = s.get(&a.id).is_some_and(|(old, t)| a.host == "127.0.0.1" && old.host != "127.0.0.1" && t.elapsed() < Duration::from_secs(3));
                         if !keep_existing {
-                            last_known().lock().insert(a.name.clone(), a.address());
+                            {
+                                // Remembered under both names, matched without regard to case or spaces.
+                                let mut known = last_known().lock();
+                                known.insert(a.name.trim().to_ascii_lowercase(), a.address());
+                                if !a.computer.is_empty() {
+                                    known.insert(a.computer.to_ascii_lowercase(), a.address());
+                                }
+                            }
                             s.insert(a.id.clone(), (a, Instant::now()));
                         }
                     }

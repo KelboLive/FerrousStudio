@@ -142,6 +142,20 @@ impl GpuCompositor {
         self.last_preview.take()
     }
 
+    /// On the window's device: the texture the last composition drew the preview into, as (texture,
+    /// generation). The texture is plain RGBA8 (sRGB-encoded values, as egui's own textures), for the window to sample directly.
+    pub fn window_preview(&self) -> Option<(wgpu::Texture, u64)> {
+        if !self.preview_drawn {
+            return None;
+        }
+        self.preview_pass.as_ref().map(|p| (p.tex.clone(), self.preview_generation))
+    }
+
+    /// Whether this compositor runs on the window's own device.
+    pub fn on_window_device(&self) -> bool {
+        self.on_window
+    }
+
     fn preview_size(&self) -> Option<(u32, u32)> {
         let pw = self.preview_width?.clamp(16, self.width.max(16));
         let pw = pw.min(self.width);
@@ -281,13 +295,6 @@ struct CachedTexture {
 /// is much cheaper than creating (and destroying) one per frame.
 const SPARE_TEXTURES: usize = 8;
 
-static PREFER_DX12: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
-/// Asks for the DX12 backend when a GPU compositor is created next (Windows; GPU-resident capture
-/// needs it).
-pub fn prefer_dx12(on: bool) {
-    PREFER_DX12.store(on, std::sync::atomic::Ordering::Relaxed);
-}
 
 /// Cache keys at or above this are shared GPU textures (the rest are frame buffer addresses).
 const SHARED_KEY: usize = 1 << (usize::BITS - 1);
@@ -357,6 +364,18 @@ pub struct GpuCompositor {
     preview_pass: Option<PreviewPass>,
     /// The preview copy of the frame most recently collected.
     last_preview: Option<(u32, u32, Vec<u8>)>,
+    /// On the window's own device: the preview is drawn into a texture the window shows directly,
+    /// with no read-back (see [`GpuCompositor::window_preview`]).
+    on_window: bool,
+    /// Counts preview textures made (a new size makes a new one), so the window knows to re-register.
+    preview_generation: u64,
+    /// The last composition drew the preview texture.
+    preview_drawn: bool,
+    /// NV12 buffers handed out recently, reused once their frames are dropped (a 1440p frame is
+    /// 5.5 MB: a fresh one every frame meant hundreds of MB/s of new memory for the OS to zero).
+    nv12_pool: Vec<Arc<Vec<u8>>>,
+    /// The canvas target's view (made once, not every frame).
+    target_view: wgpu::TextureView,
 }
 
 impl GpuCompositor {
@@ -370,7 +389,16 @@ impl GpuCompositor {
         // GPU-resident capture and in-process encoding both work through D3D12 (as OBS's own renderer
         // works through Direct3D), so on Windows ask for it first and take whatever else is there if it
         // isn't (the engine then uses CPU frames and FFmpeg's encoders). `WGPU_BACKEND` still overrides.
-        let _ = PREFER_DX12.load(std::sync::atomic::Ordering::Relaxed);
+        let window = WINDOW_DEVICE.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        if let Some((adapter, device, queue)) = window {
+            match Self::from_device(&adapter, device, queue, width, height, true) {
+                Ok(g) => {
+                    log::info!("GPU compositor shares the window's device: the preview stays on the GPU");
+                    return Ok(g);
+                }
+                Err(e) => log::warn!("couldn't composite on the window's device ({e}); using a device of its own"),
+            }
+        }
         if cfg!(windows) && std::env::var_os("WGPU_BACKEND").is_none() {
             if let Ok(g) = Self::new_on(width, height, Some(wgpu::Backends::DX12)) {
                 return Ok(g);
@@ -396,15 +424,22 @@ impl GpuCompositor {
             ..Default::default()
         }))
         .map_err(|e| anyhow::anyhow!("no GPU adapter: {e}"))?;
-        let software = adapter.get_info().device_type == wgpu::DeviceType::Cpu;
-        let adapter_is_dx12 = adapter.get_info().backend == wgpu::Backend::Dx12;
-        let adapter_name = format!("{} ({:?})", adapter.get_info().name, adapter.get_info().backend);
         let timestamps = adapter.features().contains(wgpu::Features::TIMESTAMP_QUERY);
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("ferrous-compositor"),
             required_features: if timestamps { wgpu::Features::TIMESTAMP_QUERY } else { wgpu::Features::empty() },
             ..Default::default()
         }))?;
+        Self::from_device(&adapter, device, queue, width, height, false)
+    }
+
+    /// Builds the compositor on a device that already exists: its own, or the window's (see
+    /// [`share_window_device`]), in which case the preview never leaves the GPU.
+    fn from_device(adapter: &wgpu::Adapter, device: wgpu::Device, queue: wgpu::Queue, width: u32, height: u32, on_window: bool) -> anyhow::Result<Self> {
+        let software = adapter.get_info().device_type == wgpu::DeviceType::Cpu;
+        let adapter_is_dx12 = adapter.get_info().backend == wgpu::Backend::Dx12;
+        let adapter_name = format!("{} ({:?})", adapter.get_info().name, adapter.get_info().backend);
+        let timestamps = device.features().contains(wgpu::Features::TIMESTAMP_QUERY);
         let timing = timestamps.then(|| {
             let qs = device.create_query_set(&wgpu::QuerySetDescriptor { label: Some("pass time"), ty: wgpu::QueryType::Timestamp, count: 2 });
             let resolve = device.create_buffer(&wgpu::BufferDescriptor {
@@ -515,6 +550,7 @@ impl GpuCompositor {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });
+        let target_view = target.create_view(&Default::default());
         let padded_row = (width * 4).div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT) * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
         let slots = (0..2)
             .map(|_| Slot {
@@ -576,6 +612,11 @@ impl GpuCompositor {
             preview_width: None,
             preview_pass: None,
             last_preview: None,
+            on_window,
+            preview_generation: 0,
+            preview_drawn: false,
+            nv12_pool: Vec::new(),
+            target_view,
         })
     }
 
@@ -970,7 +1011,7 @@ impl GpuCompositor {
     /// Draws the layers into the canvas and queues the copies into `slot`.
     fn record(&mut self, groups: &[wgpu::BindGroup], slot: usize, want_nv12: bool) {
         let nv12 = want_nv12 && self.ensure_nv12();
-        let view = self.target.create_view(&Default::default());
+        let view = self.target_view.clone();
         let mut enc = self.device.create_command_encoder(&Default::default());
         {
             let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -1013,9 +1054,21 @@ impl GpuCompositor {
             }
         }
         let preview = self.preview_size();
+        self.preview_drawn = false;
+        if let (true, Some((pw, ph))) = (self.on_window, preview) {
+            // Drawn where the window reads it: the queue orders this against the window's own drawing.
+            if self.preview_pass.as_ref().is_none_or(|p| (p.w, p.h) != (pw, ph)) {
+                self.preview_pass = Some(PreviewPass::new(&self.device, &self.target, pw, ph));
+                self.preview_generation += 1;
+            }
+            self.preview_pass.as_ref().expect("made above").draw(&mut enc);
+            self.preview_drawn = true;
+        }
+        let preview = preview.filter(|_| !self.on_window);
         if let Some((pw, ph)) = preview {
             if self.preview_pass.as_ref().is_none_or(|p| (p.w, p.h) != (pw, ph)) {
                 self.preview_pass = Some(PreviewPass::new(&self.device, &self.target, pw, ph));
+                self.preview_generation += 1;
             }
             let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
             let row = (pw * 4).div_ceil(align) * align;
@@ -1105,6 +1158,17 @@ impl GpuCompositor {
     }
 
     /// Reads a finished slot back into frames.
+    /// An NV12 buffer of `len` bytes' capacity: one from a frame no longer held, else a new one.
+    fn nv12_buffer(&mut self, len: usize) -> Vec<u8> {
+        if let Some(i) = self.nv12_pool.iter().position(|a| Arc::strong_count(a) == 1 && a.capacity() >= len) {
+            if let Ok(mut v) = Arc::try_unwrap(self.nv12_pool.swap_remove(i)) {
+                v.clear();
+                return v;
+            }
+        }
+        Vec::with_capacity(len)
+    }
+
     fn collect(&mut self, slot: usize, buf: Vec<u8>) -> VideoFrame {
         // Wait (a no-op when the GPU is already done) but keep the mappings.
         {
@@ -1115,6 +1179,11 @@ impl GpuCompositor {
                     let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
                 }
             }
+        }
+        let nv12_buf = self.slots[slot].has_nv12.then(|| self.nv12_buffer(self.width as usize * self.height as usize * 3 / 2));
+        if nv12_buf.is_none() {
+            // Nothing wants NV12 any more (the Link stopped, its receiver left): let the spare buffers go.
+            self.nv12_pool.clear();
         }
         let s = &self.slots[slot];
         let row = (self.width * 4) as usize;
@@ -1128,9 +1197,13 @@ impl GpuCompositor {
                 self.unmap_slot(slot);
                 return VideoFrame::new(self.width, self.height, vec![0u8; row * self.height as usize]);
             };
-            // Appending rows avoids zero-filling the whole frame first.
-            for y in 0..self.height as usize {
-                out.extend_from_slice(&data[y * self.padded_row as usize..][..row]);
+            // Appending rows avoids zero-filling the whole frame first; unpadded rows go in one copy.
+            if self.padded_row as usize == row {
+                out.extend_from_slice(&data[..row * self.height as usize]);
+            } else {
+                for y in 0..self.height as usize {
+                    out.extend_from_slice(&data[y * self.padded_row as usize..][..row]);
+                }
             }
         }
         if let (true, Some((b, pw, ph, prow))) = (s.has_preview, &s.preview) {
@@ -1145,19 +1218,32 @@ impl GpuCompositor {
         }
         // Without the BGRA read-back the frame has no CPU pixels (only NV12, if that was asked for).
         let mut frame = if s.has_bgra { VideoFrame::new(self.width, self.height, out) } else { VideoFrame { width: self.width, height: self.height, data: Arc::new(Vec::new()), nv12: None, nv12_jfif: false, gpu: None } };
-        if let (true, Some(n), Some((yb, uvb))) = (s.has_nv12, &self.nv12, &s.planes) {
+        let mut handed = None;
+        if let (true, Some(n), Some((yb, uvb)), Some(mut v)) = (s.has_nv12, &self.nv12, &s.planes, nv12_buf) {
             let (w, h) = (self.width as usize, self.height as usize);
-            let mut v = Vec::with_capacity(w * h * 3 / 2);
             if let (Ok(y), Ok(uv)) = (yb.slice(..).get_mapped_range(), uvb.slice(..).get_mapped_range()) {
-                for r in 0..h {
-                    v.extend_from_slice(&y[r * n.y_row as usize..][..w]);
-                }
-                for r in 0..h / 2 {
-                    v.extend_from_slice(&uv[r * n.uv_row as usize..][..w]);
-                }
-                frame.nv12 = Some(Arc::new(v));
+                let copy = |v: &mut Vec<u8>, src: &[u8], stride: usize, rows: usize| {
+                    if stride == w {
+                        v.extend_from_slice(&src[..w * rows]);
+                    } else {
+                        for r in 0..rows {
+                            v.extend_from_slice(&src[r * stride..][..w]);
+                        }
+                    }
+                };
+                copy(&mut v, &y, n.y_row as usize, h);
+                copy(&mut v, &uv, n.uv_row as usize, h / 2);
+                let arc = Arc::new(v);
+                handed = Some(arc.clone());
+                frame.nv12 = Some(arc);
                 frame.nv12_jfif = s.nv12_jfif;
             }
+        }
+        if let Some(a) = handed {
+            if self.nv12_pool.len() >= 6 {
+                self.nv12_pool.remove(0);
+            }
+            self.nv12_pool.push(a);
         }
         if let Some(ts) = &s.ts {
             if let (Some((_, _, period)), Ok(data)) = (&self.timing, ts.slice(..).get_mapped_range()) {
@@ -1245,7 +1331,9 @@ impl PreviewPass {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::Rgba8Unorm,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            // Sampled by the window when the compositor shares its device, as plain RGBA8 like egui's
+            // own textures.
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("preview"), source: wgpu::ShaderSource::Wgsl(PREVIEW_SHADER.into()) });
@@ -1298,6 +1386,15 @@ impl PreviewPass {
     }
 
     fn encode(&self, enc: &mut wgpu::CommandEncoder, buf: &wgpu::Buffer, row: u32) {
+        self.draw(enc);
+        enc.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo { texture: &self.tex, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+            wgpu::TexelCopyBufferInfo { buffer: buf, layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(row), rows_per_image: Some(self.h) } },
+            wgpu::Extent3d { width: self.w, height: self.h, depth_or_array_layers: 1 },
+        );
+    }
+
+    fn draw(&self, enc: &mut wgpu::CommandEncoder) {
         {
             let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("preview"),
@@ -1313,12 +1410,18 @@ impl PreviewPass {
             pass.set_bind_group(0, &self.bind, &[]);
             pass.draw(0..4, 0..1);
         }
-        enc.copy_texture_to_buffer(
-            wgpu::TexelCopyTextureInfo { texture: &self.tex, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
-            wgpu::TexelCopyBufferInfo { buffer: buf, layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(row), rows_per_image: Some(self.h) } },
-            wgpu::Extent3d { width: self.w, height: self.h, depth_or_array_layers: 1 },
-        );
     }
+}
+
+/// The window's device, lent to the compositor (see [`share_window_device`]).
+#[allow(clippy::type_complexity)]
+static WINDOW_DEVICE: std::sync::Mutex<Option<(wgpu::Adapter, wgpu::Device, wgpu::Queue)>> = std::sync::Mutex::new(None);
+
+/// Lets compositors created from now on draw on the window's own GPU device, as OBS does: the preview
+/// is then drawn into a texture the window shows directly, never copied to the CPU. Call before the
+/// engine starts. `None` goes back to a device of the compositor's own.
+pub fn share_window_device(device: Option<(wgpu::Adapter, wgpu::Device, wgpu::Queue)>) {
+    *WINDOW_DEVICE.lock().unwrap_or_else(|e| e.into_inner()) = device;
 }
 
 fn map_buffer(device: &wgpu::Device, label: &str, size: u64) -> wgpu::Buffer {

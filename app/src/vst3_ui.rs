@@ -31,7 +31,7 @@ struct Cache {
 }
 
 fn cache_path() -> Option<PathBuf> {
-    Some(dirs::config_dir()?.join("Ferrous").join("vst3-cache.json"))
+    Some(ferrous_core::paths::config_dir().join("vst3-cache.json"))
 }
 
 fn mtime(p: &Path) -> u64 {
@@ -202,7 +202,7 @@ pub fn filter_body(ui: &mut egui::Ui, salt: impl std::hash::Hash + std::fmt::Deb
             let r = ui.add_enabled(can, egui::Button::new("Open plugin editor"));
             let r = if can { r } else { r.on_disabled_hover_text("Plugin editors open on Windows") };
             if r.clicked() {
-                if let Err(e) = p.open_editor(&format!("{name} · Ferrous")) {
+                if let Err(e) = p.open_editor(&format!("{name} · Ferrous Studio")) {
                     log::warn!("VST3 editor: {e:#}");
                 }
             }

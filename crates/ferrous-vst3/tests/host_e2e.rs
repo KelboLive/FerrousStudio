@@ -46,8 +46,8 @@ fn scan_load_process_params_state() {
     let classes = ferrous_vst3::scan(&b).unwrap();
     assert_eq!(classes.len(), 1, "{classes:?}");
     let c = &classes[0];
-    assert_eq!(c.name, "Ferrous Test Gain");
-    assert_eq!(c.vendor, "Ferrous");
+    assert_eq!(c.name, "Ferrous Studio Test Gain");
+    assert_eq!(c.vendor, "Ferrous Studio");
 
     let mut p = ferrous_vst3::Plugin::load(&b, &c.cid, 48_000.0, 480, None).unwrap();
     let params = p.params();

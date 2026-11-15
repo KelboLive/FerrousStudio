@@ -47,7 +47,7 @@ fn main() -> eframe::Result {
         let mut logger = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"));
         // Release builds on Windows have no console, so stderr goes nowhere:
         // log to a file next to the settings instead (replaced each launch).
-        // The previous session's log is kept as ferrous.previous.log.
+        // The previous session's log is kept as ferrous-studio.previous.log.
         if cfg!(all(windows, not(debug_assertions))) {
             if let Ok(file) = std::fs::File::create(crash::rotate_log()) {
                 logger.target(env_logger::Target::Pipe(Box::new(file)));
@@ -61,7 +61,7 @@ fn main() -> eframe::Result {
 
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
-            .with_title("Ferrous")
+            .with_title("Ferrous Studio")
             .with_inner_size([1440.0, 860.0])
             .with_min_inner_size([960.0, 600.0])
             .with_app_id("ferrous")
@@ -73,7 +73,7 @@ fn main() -> eframe::Result {
         ..Default::default()
     };
     eframe::run_native(
-        "Ferrous",
+        "Ferrous Studio",
         options,
         Box::new(|cc| {
             theme::apply(&cc.egui_ctx);
@@ -89,6 +89,17 @@ fn wgpu_options() -> eframe::egui_wgpu::WgpuConfiguration {
     use eframe::egui_wgpu::{WgpuConfiguration, WgpuSetup};
     use eframe::wgpu;
     let mut config = WgpuConfiguration::default();
+    if let WgpuSetup::CreateNew(create) = &mut config.wgpu_setup {
+        // With *GPU preview* the compositor runs on this device too, and times its passes with these.
+        let base = create.device_descriptor.clone();
+        create.device_descriptor = std::sync::Arc::new(move |adapter: &wgpu::Adapter| {
+            let mut d = base(adapter);
+            if adapter.features().contains(wgpu::Features::TIMESTAMP_QUERY) {
+                d.required_features |= wgpu::Features::TIMESTAMP_QUERY;
+            }
+            d
+        });
+    }
     if cfg!(windows) && std::env::var_os("WGPU_BACKEND").is_none() {
         if let WgpuSetup::CreateNew(create) = &mut config.wgpu_setup {
             create.native_adapter_selector = Some(std::sync::Arc::new(|adapters: &[wgpu::Adapter], surface: Option<&wgpu::Surface<'_>>| {

@@ -11,8 +11,11 @@ const EXE: &str = "ffmpeg";
 /// Resolution order: explicit setting, `ffmpeg.exe` beside our executable,
 /// `ffmpeg\bin\ffmpeg.exe` beside our executable, then whatever is on PATH.
 pub fn locate(configured: &str) -> PathBuf {
-    if !configured.trim().is_empty() {
-        return PathBuf::from(configured.trim());
+    // A configured path that no longer exists (a moved or deleted install) falls back to the bundled
+    // FFmpeg instead of failing every encode and every hardware Link with "file not found".
+    let configured = configured.trim().trim_matches('"');
+    if !configured.is_empty() && (Path::new(configured).is_file() || !Path::new(configured).is_absolute()) {
+        return PathBuf::from(configured);
     }
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {

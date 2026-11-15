@@ -412,7 +412,7 @@ pub fn import_json(text: &str) -> anyhow::Result<(SceneCollection, ImportReport)
     coll.transition = Transition { kind, duration_ms: root["transition_duration"].as_u64().unwrap_or(300) as u32 };
     for name in ["DesktopAudioDevice1", "AuxAudioDevice1"] {
         if root[name].is_object() {
-            report.skipped.push(format!("{name}: global audio device settings stay in your Ferrous profile"));
+            report.skipped.push(format!("{name}: global audio device settings stay in your Ferrous Studio profile"));
         }
     }
     Ok((coll, report))

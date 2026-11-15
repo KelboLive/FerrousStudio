@@ -38,6 +38,11 @@ pub struct SourcePerf {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PreviewConfig {
     pub enabled: bool,
+    /// The main canvas's preview is shown (off when only the vertical canvas is on screen: then the
+    /// main preview isn't drawn at all).
+    pub main: bool,
+    /// The vertical canvas's preview is shown.
+    pub vertical: bool,
     /// 0 = every rendered frame.
     pub max_fps: u32,
     /// Pixel width for the program/studio preview, and for the vertical one.
@@ -47,7 +52,7 @@ pub struct PreviewConfig {
 
 impl Default for PreviewConfig {
     fn default() -> Self {
-        Self { enabled: true, max_fps: 0, width: 1280, vertical_width: 720 }
+        Self { enabled: true, main: true, vertical: true, max_fps: 0, width: 1280, vertical_width: 720 }
     }
 }
 
@@ -80,6 +85,17 @@ impl Laps {
         self.ms[stage] += (now - self.t).as_secs_f32() * 1000.0;
         self.t = now;
     }
+}
+
+/// See [`Engine::window_preview`].
+#[derive(Clone)]
+pub struct WindowPreview {
+    /// Plain RGBA8 holding sRGB-encoded values, like egui's own textures.
+    pub texture: ferrous_render::wgpu::Texture,
+    /// Changes when the texture is replaced (a new size): the window must register the new one.
+    pub generation: u64,
+    /// Changes with every new picture drawn into it.
+    pub serial: u64,
 }
 
 pub struct PreviewFrame {
@@ -280,6 +296,10 @@ struct Shared {
     /// pointer copy each frame instead of deep-cloning every scene.
     scenes: Mutex<Arc<SceneCollection>>,
     preview: Mutex<Option<Arc<PreviewFrame>>>,
+    /// The program preview as a texture on the window's own device, when the compositor shares it.
+    window_preview: Mutex<Option<WindowPreview>>,
+    /// The same for the vertical canvas.
+    window_vertical_preview: Mutex<Option<WindowPreview>>,
     source_info: Mutex<HashMap<u64, SourceInfo>>,
     outputs: Mutex<Outputs>,
     status: Mutex<EngineStatus>,
@@ -340,7 +360,7 @@ fn zero_copy_config(cfg: &OutputConfig) -> Option<(ferrous_render::ferrous_nvenc
     use ferrous_render::ferrous_nvenc::{Codec, Config, Rate};
     let v = &cfg.video;
     let e = &cfg.encoder;
-    if !v.zero_copy_encoding || v.renderer == ferrous_core::RendererMode::Cpu || ferrous_encode::args::hdr_active(e) || !e.custom_args.trim().is_empty() {
+    if !v.zero_copy_encoding || v.renderer == ferrous_core::RendererMode::Cpu || !e.custom_args.trim().is_empty() {
         return None;
     }
     let (codec, format) = match e.encoder.as_str() {
@@ -431,7 +451,7 @@ fn start_zero_copy(shared: &Shared, audio: &AudioEngine, cfg: &OutputConfig, con
                 }
             }
             *st = SinkState::Ready(packets);
-            log::info!("{}: encoding on the GPU inside Ferrous (zero copy)", cfg.encoder.encoder);
+            log::info!("{}: encoding on the GPU inside Ferrous Studio (zero copy)", cfg.encoder.encoder);
             Ok(out)
         }
         Err(e) => {
@@ -466,6 +486,8 @@ impl Engine {
         let shared = Arc::new(Shared {
             scenes: Mutex::new(Arc::new(scenes)),
             preview: Mutex::new(None),
+            window_preview: Mutex::new(None),
+            window_vertical_preview: Mutex::new(None),
             source_info: Mutex::new(HashMap::new()),
             outputs: Mutex::new(Outputs::default()),
             status: Mutex::new(EngineStatus::default()),
@@ -570,6 +592,17 @@ impl Engine {
 
     pub fn preview(&self) -> Option<Arc<PreviewFrame>> {
         self.shared.preview.lock().clone()
+    }
+
+    /// The program preview as a texture the window can draw directly (only when the compositor runs
+    /// on the window's device; see `ferrous_render::share_window_device`).
+    pub fn window_preview(&self) -> Option<WindowPreview> {
+        self.shared.window_preview.lock().clone()
+    }
+
+    /// [`Engine::window_preview`] for the vertical canvas.
+    pub fn window_vertical_preview(&self) -> Option<WindowPreview> {
+        self.shared.window_vertical_preview.lock().clone()
     }
 
     /// Native size and last error of each source, by scene item id.
@@ -844,7 +877,7 @@ impl Control {
         Ok(())
     }
 
-    /// Starts the virtual camera ("Ferrous Virtual Camera", 1080p30).
+    /// Starts the virtual camera ("Ferrous Studio Virtual Camera", 1080p30).
     /// On Windows this registers the camera with the system (Windows 11,
     /// camera source installed); frames flow once an app opens it.
     pub fn start_virtual_camera(&self) -> anyhow::Result<()> {
@@ -1235,9 +1268,6 @@ const FRAME_HISTORY: usize = 600;
 fn render_loop(shared: Arc<Shared>, audio: Arc<AudioEngine>, video: ferrous_core::VideoSettings, ffmpeg_path: PathBuf) {
     let fps = video.fps.clamp(1, 240);
     let period = Duration::from_secs_f64(1.0 / fps as f64);
-    let gpu_capture = video.gpu_capture && video.renderer != ferrous_core::RendererMode::Cpu;
-    ferrous_capture::set_gpu_capture(gpu_capture);
-    ferrous_render::prefer_dx12(gpu_capture);
     let (mut compositor, gpu_error) = Renderer::new(
         video.base_width,
         video.base_height,
@@ -1247,6 +1277,10 @@ fn render_loop(shared: Arc<Shared>, audio: Arc<AudioEngine>, video: ferrous_core
         let _ = shared.events.try_send(EngineEvent::Error(format!("GPU compositor unavailable, using CPU: {e}")));
     }
     shared.status.lock().renderer = compositor.describe();
+    // Windows capture keeps frames on the GPU whenever this compositor can draw them (a DX12
+    // compositor on the capture's GPU); otherwise captures make CPU frames only, not both.
+    let mut gpu_capture = compositor.takes_gpu_frames();
+    ferrous_capture::set_gpu_capture(gpu_capture);
     // GPU path: have it convert to NV12 for encoders (when one will use it)
     // and read results back a frame late instead of waiting on the GPU.
     if video.gpu_priority {
@@ -1255,7 +1289,8 @@ fn render_loop(shared: Arc<Shared>, audio: Arc<AudioEngine>, video: ferrous_core
     let on_gpu = compositor.is_gpu();
     ferrous_output::set_gpu_nv12(on_gpu);
     compositor.set_nv12(on_gpu);
-    let pipelined_readback = on_gpu && video.pipelined_readback;
+    // Read GPU results a frame late instead of waiting for them (always: waiting only adds stalls).
+    let pipelined_readback = on_gpu;
     let mut vertical: Option<((u32, u32), Renderer)> = video.vertical.map(|(w, h)| {
         let (w, h) = (w & !1, h & !1);
         ((w, h), Renderer::new(w, h, video.renderer != ferrous_core::RendererMode::Cpu).0)
@@ -1313,6 +1348,7 @@ fn render_loop(shared: Arc<Shared>, audio: Arc<AudioEngine>, video: ferrous_core
         let pcfg = *shared.preview_cfg.lock();
         let divisor = if pcfg.max_fps == 0 { 1 } else { u64::from(fps.div_ceil(pcfg.max_fps.max(1))) };
         let preview_due = pcfg.enabled && frame_no.is_multiple_of(divisor);
+        let main_due = preview_due && pcfg.main;
         if !pcfg.enabled {
             // Re-enabling must publish at once, even for a static scene.
             preview_src = None;
@@ -1377,7 +1413,8 @@ fn render_loop(shared: Arc<Shared>, audio: Arc<AudioEngine>, video: ferrous_core
             };
             let (links_nv12, jpeg_yuv_links, links_bgra) = {
                 let ls = shared.links.lock();
-                let program = |l: &&ActiveLink| matches!(l.cfg.target, ferrous_core::LinkSourceTarget::Program);
+                // A Link nobody is connected to encodes nothing, so it needs no read-back either.
+                let program = |l: &&ActiveLink| matches!(l.cfg.target, ferrous_core::LinkSourceTarget::Program) && l.sender.has_clients();
                 let hw_frames = |l: &&ActiveLink| matches!(l.cfg.codec, ferrous_core::LinkCodec::Hardware { .. }) && l.sender.stream_input().is_none();
                 let jpeg_420 = |l: &&ActiveLink| matches!(l.cfg.codec, ferrous_core::LinkCodec::Jpeg { full_chroma: false, .. }) && canvas_size(l);
                 (
@@ -1393,7 +1430,7 @@ fn render_loop(shared: Arc<Shared>, audio: Arc<AudioEngine>, video: ferrous_core
             compositor.set_nv12_jfif(jfif);
             // With pipelined read-back the frame returned now was drawn last time, so a preview due
             // next frame counts too.
-            let preview_soon = pcfg.enabled && (preview_due || (pipelined_readback && (frame_no + 1).is_multiple_of(divisor)));
+            let preview_soon = pcfg.enabled && pcfg.main && (preview_due || (pipelined_readback && (frame_no + 1).is_multiple_of(divisor)));
             let jpeg_needs_bgra = jpeg_yuv_links && !jfif;
             // The preview is drawn at its own size on the GPU and read back on its own (a quarter of
             // the bytes or less, no CPU downscale), so it doesn't need the full picture.
@@ -1408,7 +1445,17 @@ fn render_loop(shared: Arc<Shared>, audio: Arc<AudioEngine>, video: ferrous_core
         if encoding && !in_transition {
             compositor.set_encode_pts(Some(frame_no));
         }
-        let to = compose_nested(&scenes.scenes[program], Some(&scenes), &mut cache, &mut compositor, 0);
+        // Nothing uses the main canvas this frame (vertical-only on screen, or the window minimised,
+        // and no output, Link, virtual camera, studio mode or transition): don't composite it.
+        let main_idle = !(pcfg.enabled && pcfg.main) && !in_transition && !encoding && shared.studio_scene.lock().is_none() && shared.links.lock().is_empty() && {
+            let o = shared.outputs.lock();
+            o.record.is_none() && o.stream.is_none() && o.replay.is_none() && o.vcam.is_none() && o.extras.iter().all(|e| e.vertical)
+        };
+        let to = if main_idle {
+            VideoFrame { width: video.base_width, height: video.base_height, data: Arc::new(Vec::new()), nv12: None, nv12_jfif: false, gpu: None }
+        } else {
+            compose_nested(&scenes.scenes[program], Some(&scenes), &mut cache, &mut compositor, 0)
+        };
         compositor.set_encode_pts(None);
         // Everything composed after the program picture (studio preview, multiview, scenes for links)
         // is read back as plain BGRA.
@@ -1472,11 +1519,32 @@ fn render_loop(shared: Arc<Shared>, audio: Arc<AudioEngine>, video: ferrous_core
 
         laps.lap(0);
         // Vertical canvas: same program scene, its own layout.
-        let vcanvas = vertical.as_mut().map(|(size, vr)| {
+        // Like the program picture: the full vertical picture is read back only when an output (or a
+        // transition) needs it, and its preview is drawn at preview size on the GPU.
+        let v_outputs = {
+            let o = shared.outputs.lock();
+            o.replay_vertical.is_some() || o.extras.iter().any(|e| e.vertical && e.output.is_some())
+        };
+        let v_preview_soon = on_gpu && transition.is_none() && pcfg.enabled && (preview_due || (pipelined_readback && (frame_no + 1).is_multiple_of(divisor)));
+        let mut v_gpu_preview = None;
+        let mut v_window_preview = None;
+        // Composited only when a vertical output, its preview on screen or a transition uses it.
+        let v_needed = v_outputs || in_transition || (pcfg.enabled && pcfg.vertical);
+        let vcanvas = vertical.as_mut().filter(|_| v_needed).map(|(size, vr)| {
             // Like the program picture: read the vertical canvas back a frame late instead of waiting for the
             // GPU on every changed frame (a transition needs both pictures current, so it waits).
             vr.set_pipelined(pipelined_readback && transition.is_none());
+            if on_gpu {
+                vr.set_bgra(v_outputs || transition.is_some());
+                vr.set_preview_width(v_preview_soon.then_some(pcfg.vertical_width));
+            }
             let to = compose_vertical(&scenes.scenes[program], &scenes, &mut cache, vr, *size, (video.base_width, video.base_height));
+            if on_gpu {
+                vr.set_preview_width(None);
+                vr.set_bgra(true);
+                v_gpu_preview = vr.take_preview();
+                v_window_preview = vr.window_preview();
+            }
             match &transition {
                 Some(t) if !matches!(t.cfg.kind, ferrous_core::TransitionKind::Stinger { .. } | ferrous_core::TransitionKind::Matte { .. }) => {
                     let p = t.start.elapsed().as_secs_f32() * 1000.0 / t.cfg.duration_ms.max(1) as f32;
@@ -1487,7 +1555,21 @@ fn render_loop(shared: Arc<Shared>, audio: Arc<AudioEngine>, video: ferrous_core
             }
         });
         laps.lap(1);
-        if let Some(v) = &vcanvas {
+        if let (true, Some((texture, generation))) = (preview_due, v_window_preview) {
+            serial += 1;
+            *shared.window_vertical_preview.lock() = Some(WindowPreview { texture, generation, serial });
+            vpreview_src = None;
+            if let Some(f) = shared.frame_notify.lock().clone() {
+                f();
+            }
+        } else if let (true, Some((w, h, rgba))) = (preview_due, v_gpu_preview) {
+            serial += 1;
+            *shared.vertical_preview.lock() = Some(Arc::new(PreviewFrame { width: w, height: h, rgba, serial }));
+            vpreview_src = None;
+            if let Some(f) = shared.frame_notify.lock().clone() {
+                f();
+            }
+        } else if let Some(v) = vcanvas.as_ref().filter(|v| !v.data.is_empty()) {
             if preview_due && !same_buffer(&vpreview_src, v) {
                 vpreview_src = Some(v.data.clone());
                 serial += 1;
@@ -1556,14 +1638,22 @@ fn render_loop(shared: Arc<Shared>, audio: Arc<AudioEngine>, video: ferrous_core
 
         laps.lap(3);
         // Program preview: every rendered frame unless capped.
-        if let (true, Some((w, h, rgba)), false) = (preview_due, gpu_preview, in_transition) {
+        let window_tex = if main_due && !in_transition { compositor.window_preview() } else { None };
+        if let Some((texture, generation)) = window_tex {
+            serial += 1;
+            *shared.window_preview.lock() = Some(WindowPreview { texture, generation, serial });
+            preview_src = None;
+            if let Some(f) = shared.frame_notify.lock().clone() {
+                f();
+            }
+        } else if let (true, Some((w, h, rgba)), false) = (main_due, gpu_preview, in_transition) {
             serial += 1;
             *shared.preview.lock() = Some(Arc::new(PreviewFrame { width: w, height: h, rgba, serial }));
             preview_src = None;
             if let Some(f) = shared.frame_notify.lock().clone() {
                 f();
             }
-        } else if preview_due && !canvas.data.is_empty() && !same_buffer(&preview_src, &canvas) {
+        } else if main_due && !canvas.data.is_empty() && !same_buffer(&preview_src, &canvas) {
             preview_src = Some(canvas.data.clone());
             serial += 1;
             previews.submit(PreviewKind::Program, &canvas, pcfg.width, serial);
@@ -1613,6 +1703,11 @@ fn render_loop(shared: Arc<Shared>, audio: Arc<AudioEngine>, video: ferrous_core
 
         if last_supervise.elapsed() >= Duration::from_millis(500) {
             last_supervise = Instant::now();
+            // A capture on another GPU is only found out when its first frame can't be opened.
+            if gpu_capture && !compositor.takes_gpu_frames() {
+                gpu_capture = false;
+                ferrous_capture::set_gpu_capture(false);
+            }
             supervise(&shared, &audio);
             {
                 let mut perf = shared.perf.lock();
@@ -1767,7 +1862,7 @@ fn start_link_sender(shared: &Shared, mut sc: ferrous_link::sender::SenderConfig
     use ferrous_render::ferrous_nvenc::{Codec, Config, Rate};
     let v = &settings.video;
     let gpu = match &cfg.codec {
-        ferrous_core::LinkCodec::Hardware { encoder, bitrate_kbps }
+        ferrous_core::LinkCodec::Hardware { encoder, bitrate_kbps, preset }
             if v.zero_copy_encoding && v.renderer != ferrous_core::RendererMode::Cpu && matches!(cfg.target, ferrous_core::LinkSourceTarget::Program) && sc.fps == v.fps =>
         {
             let codec = match encoder.as_str() {
@@ -1783,8 +1878,11 @@ fn start_link_sender(shared: &Shared, mut sc: ferrous_link::sender::SenderConfig
                 // Variable bitrate around the target; no look-ahead, no B-frames: each frame leaves as
                 // soon as it is encoded.
                 rate: Rate::Vbr((*bitrate_kbps).max(1000)),
-                preset: 4,
-                keyframe_interval_frames: sc.fps.max(1),
+                // p6: cleaner detail at the same bitrate; NVENC runs on its own engine, so the game's
+                // frame rate is unaffected.
+                preset: (*preset).clamp(1, 7),
+                // A keyframe every 2 s: fewer bitrate pulses; a new receiver waits at most 2 s to join.
+                keyframe_interval_frames: sc.fps.max(1) * 2,
                 lookahead: false,
                 multipass: false,
                 bframes: 0,
@@ -1811,7 +1909,7 @@ fn start_link_sender(shared: &Shared, mut sc: ferrous_link::sender::SenderConfig
         shared.encoder_requests.lock().push(EncoderRequest { config, sink, reply });
         match rx.recv_timeout(Duration::from_secs(3)) {
             Ok(Ok(())) => {
-                log::info!("Ferrous Link \"{}\": encoding on the GPU inside Ferrous (zero copy)", cfg.name);
+                log::info!("Ferrous Link \"{}\": encoding on the GPU inside Ferrous Studio (zero copy)", cfg.name);
                 return Ok(sender);
             }
             Ok(Err(e)) => log::warn!("Ferrous Link \"{}\": GPU encoder not used ({e}); using FFmpeg", cfg.name),

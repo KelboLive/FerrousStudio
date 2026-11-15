@@ -128,7 +128,7 @@ pub fn run(i: &Inputs) -> Vec<Check> {
     };
     let tab = if i.kind == Kind::Stream { "stream" } else { "recording" };
     if !i.ffmpeg_found && !enc.encoder.starts_with("mf_") {
-        out.push(problem(Error, "FFmpeg wasn't found", "Ferrous needs ffmpeg.exe to encode. Put it next to Ferrous.exe, or point to it in Settings → Advanced.", Some(Fix::Settings("advanced"))));
+        out.push(problem(Error, "FFmpeg wasn't found", "Ferrous Studio needs ffmpeg.exe to encode. Put it next to Ferrous Studio.exe, or point to it in Settings → Advanced.", Some(Fix::Settings("advanced"))));
     } else if let Some(w) = &i.working_encoders {
         if !w.contains(&enc.encoder) {
             out.push(problem(Error, "The chosen video encoder doesn't work on this PC", format!("“{}” failed its test (often a missing graphics driver or card). Pick another quality profile or Software (x264).", enc.encoder), Some(Fix::Settings(tab))));
@@ -138,7 +138,7 @@ pub fn run(i: &Inputs) -> Vec<Check> {
     match i.kind {
         Kind::Record => {
             if !i.folder_ok {
-                out.push(problem(Error, "Can't save to the recording folder", format!("Ferrous can't write to {}. Choose another folder.", s.record.folder.display()), Some(Fix::Settings("recording"))));
+                out.push(problem(Error, "Can't save to the recording folder", format!("Ferrous Studio can't write to {}. Choose another folder.", s.record.folder.display()), Some(Fix::Settings("recording"))));
             } else if let Some(b) = i.free_bytes {
                 let gb = b as f64 / 1e9;
                 let rate = per_hour_gb(enc.bitrate_kbps, s.record.audio_bitrate_kbps).max(1.0);
@@ -232,11 +232,11 @@ pub fn friendly(raw: &str) -> Option<(String, Option<Fix>)> {
     } else if has(&["connection refused", "timed out", "could not resolve", "name or service not known", "network is unreachable", "no route to host", "failed to connect", "getaddrinfo"]) {
         ("Couldn't reach the streaming server. Check your internet connection and the server address in Settings → Stream.", Some(Fix::Settings("stream")))
     } else if l.contains("ffmpeg") && has(&["not found", "no such file", "cannot find", "program not found", "failed to start", "couldn't start", "could not start"]) {
-        ("FFmpeg wasn't found. Put ffmpeg.exe next to Ferrous.exe, or point to it in Settings → Advanced.", Some(Fix::Settings("advanced")))
+        ("FFmpeg wasn't found. Put ffmpeg.exe next to Ferrous Studio.exe, or point to it in Settings → Advanced.", Some(Fix::Settings("advanced")))
     } else if has(&["nvenc", "openencodesession", "no capable devices", "cuda", "amf", "qsv", "mfx"]) {
         ("Your graphics card's video encoder isn't available. Choose a different quality profile or Software (x264) in Settings → Recording.", Some(Fix::Settings("recording")))
     } else if has(&["permission denied", "access is denied", "read-only file system"]) {
-        ("Ferrous isn't allowed to save there. Choose another recording folder.", Some(Fix::Settings("recording")))
+        ("Ferrous Studio isn't allowed to save there. Choose another recording folder.", Some(Fix::Settings("recording")))
     } else if has(&["no space left", "disk full", "not enough space"]) {
         ("Your drive is full. Free up some space or pick another folder in Settings → Recording.", Some(Fix::Settings("recording")))
     } else if has(&["broken pipe", "encoder exited", "encoder stopped", "pipe closed"]) {

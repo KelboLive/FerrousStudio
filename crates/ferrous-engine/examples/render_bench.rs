@@ -25,14 +25,14 @@ fn main() {
     settings.video = VideoSettings {
         base_width: 1920, base_height: 1080, output_width: 1920, output_height: 1080, fps: 60,
         renderer: if gpu { RendererMode::Auto } else { RendererMode::Cpu },
-        vertical: heavy.then_some((1080, 1920)), conversion: Default::default(), pipelined_readback: true, gpu_priority: false, gpu_capture: false, zero_copy_encoding: false,
+        vertical: heavy.then_some((1080, 1920)), conversion: Default::default(), gpu_priority: false, zero_copy_encoding: false, gpu_preview: false,
     };
     settings.audio.desktop_enabled = false;
     settings.audio.mic_enabled = false;
     if heavy {
         settings.links = vec![LinkOutputSettings {
             enabled: true, name: "bench".into(), target: LinkSourceTarget::Program,
-            codec: LinkCodec::Jpeg { quality: 85, adaptive: false, full_chroma: false }, width: 1280, height: 720, fps: 0, port: 0,
+            codec: LinkCodec::Jpeg { quality: 85, full_chroma: false }, width: 1280, height: 720, fps: 0, port: 0,
             pin: String::new(), audio: false, ..Default::default()
         }];
     }
@@ -48,7 +48,7 @@ fn main() {
         i.transform = Transform { x: 1380.0, y: 760.0, scale_x: 0.8, scale_y: 0.8, ..Default::default() };
     }
     let engine = Engine::start(settings, scenes);
-    engine.set_preview_config(PreviewConfig { enabled: true, max_fps: 0, width: 1280, vertical_width: 540 });
+    engine.set_preview_config(PreviewConfig { enabled: true, main: true, vertical: true, max_fps: 0, width: 1280, vertical_width: 540 });
     let _rx = heavy.then(|| {
         std::thread::sleep(Duration::from_millis(500));
         let port = engine.link_stats().first().map(|l| l.1).unwrap_or(47778);

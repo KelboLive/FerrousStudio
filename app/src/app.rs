@@ -140,6 +140,12 @@ pub struct FerrousApp {
     selected: Option<u64>,
     preview_tex: Option<TextureHandle>,
     preview_serial: u64,
+    /// The window's GPU state (eframe's), for showing the compositor's preview texture directly.
+    render_state: Option<eframe::egui_wgpu::RenderState>,
+    /// The compositor's preview texture registered with egui: (generation, id).
+    window_preview: Option<(u64, egui::TextureId)>,
+    /// The same for the vertical canvas.
+    window_vertical: Option<(u64, egui::TextureId)>,
     settings_win: SettingsWindow,
     probe: SharedProbe,
     toasts: Vec<Toast>,
@@ -200,6 +206,8 @@ pub struct FerrousApp {
     /// Starts running on a helper thread (FFmpeg and the GPU encoder can take a few seconds to come
     /// up, and the window shouldn't freeze meanwhile): what is starting and where its message arrives.
     starting: Vec<(StartKind, std::sync::mpsc::Receiver<(String, bool)>)>,
+    /// The Controls dock is short this frame: shorter buttons, Settings/Recordings beside the title.
+    controls_compact: bool,
     palette: crate::palette::Palette,
     /// The pre-flight window: what was about to start, and what was found.
     preflight: Option<(crate::preflight::Kind, Vec<crate::preflight::Check>)>,
@@ -221,6 +229,7 @@ impl FerrousApp {
         let scenes = library.load_collection(&active.collection);
         let probe = settings_ui::start_probe(&settings.ffmpeg_path, cc.egui_ctx.clone());
         ferrous_link::discovery::start_listening();
+        share_window_device(cc, &settings);
         let engine = Engine::start(settings.clone(), scenes.clone());
         {
             let ctx = cc.egui_ctx.clone();
@@ -248,6 +257,9 @@ impl FerrousApp {
             selected: None,
             preview_tex: None,
             preview_serial: 0,
+            render_state: cc.wgpu_render_state.clone(),
+            window_preview: None,
+            window_vertical: None,
             settings_win: SettingsWindow::new(),
             probe,
             toasts: Vec::new(),
@@ -286,6 +298,7 @@ impl FerrousApp {
             vertical_serial: 0,
             session_prompt: None,
             starting: Vec::new(),
+            controls_compact: false,
             palette: Default::default(),
             preflight: None,
             tour_step: 0,
@@ -404,6 +417,11 @@ impl FerrousApp {
     }
 
     fn tick(&mut self, ctx: &egui::Context) {
+        // Vertical-only layouts close the main Preview; if the vertical canvas is turned off, bring
+        // the main one back so there is always a picture.
+        if self.vertical_size().is_none() && !self.layout.is_open(crate::layout::Dock::Preview) {
+            self.layout.open(crate::layout::Dock::Preview);
+        }
         self.sync_preview_config(ctx);
         self.persist_mixer_state();
         self.poll_starts();
@@ -453,6 +471,11 @@ impl FerrousApp {
 
         // Previews are always opaque, where premultiplied == straight alpha,
         // so the cheaper constructor (no per-pixel conversion) is exact.
+        // The compositor draws on this window's device: show its textures as they are.
+        if let Some(rs) = &self.render_state {
+            register_window_preview(rs, self.engine.window_preview(), &mut self.window_preview);
+            register_window_preview(rs, self.engine.window_vertical_preview(), &mut self.window_vertical);
+        }
         if let Some(p) = self.engine.preview() {
             if p.serial != self.preview_serial {
                 self.preview_serial = p.serial;
@@ -559,7 +582,7 @@ impl FerrousApp {
     fn top_bar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.add(egui::Image::new(&self.logo).fit_to_exact_size(egui::vec2(20.0, 20.0)));
-            ui.label(RichText::new("Ferrous").strong().color(theme::accent()));
+            ui.label(RichText::new("Ferrous Studio").strong().color(theme::accent()));
             ui.add_space(12.0);
             ui.menu_button("File", |ui| {
                 if ui.button("Open recordings folder").clicked() {
@@ -602,7 +625,7 @@ impl FerrousApp {
                     let dll = std::env::current_exe().ok().and_then(|e| e.parent().map(|d| d.join("ferrous_vcam.dll")));
                     let installed = ferrous_vcam::win::installed();
                     let label = if installed { "Reinstall Virtual Camera…" } else { "Install Virtual Camera…" };
-                    if ui.add_enabled(dll.as_ref().is_some_and(|d| d.exists()), egui::Button::new(label)).on_hover_text("Registers Ferrous's camera with Windows (asks for administrator rights once)").clicked() {
+                    if ui.add_enabled(dll.as_ref().is_some_and(|d| d.exists()), egui::Button::new(label)).on_hover_text("Registers Ferrous Studio's camera with Windows (asks for administrator rights once)").clicked() {
                         if let Some(d) = &dll {
                             match ferrous_vcam::win::install(d) {
                                 Ok(()) => self.toast("Virtual camera installed", false),
@@ -1159,7 +1182,7 @@ impl FerrousApp {
         let mut close = false;
         ctx.show_viewport_immediate(
             egui::ViewportId::from_hash_of("ferrous-projector"),
-            egui::ViewportBuilder::default().with_title("Ferrous Projector").with_inner_size([960.0, 540.0]).with_min_inner_size([320.0, 180.0]),
+            egui::ViewportBuilder::default().with_title("Ferrous Studio Projector").with_inner_size([960.0, 540.0]).with_min_inner_size([320.0, 180.0]),
             |root, _| {
                 let ctx = root.ctx().clone();
                 if ctx.input(|i| i.viewport().close_requested()) {
@@ -1173,8 +1196,8 @@ impl FerrousApp {
                     let rect = Rect::from_center_size(avail.center(), Vec2::new(cw * scale, ch * scale));
                     // Ask the engine for a picture as big as this window shows it.
                     self.note_preview_drawn(ui, rect, false);
-                    if let Some(tex) = &self.preview_tex {
-                        ui.painter().image(tex.id(), rect, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
+                    if let Some(id) = self.program_texture() {
+                        ui.painter().image(id, rect, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
                     }
                     let r = ui.interact(avail, egui::Id::new("projector_area"), Sense::click());
                     if r.double_clicked() {
@@ -1204,7 +1227,7 @@ impl FerrousApp {
         let mut go = None;
         ctx.show_viewport_immediate(
             egui::ViewportId::from_hash_of("ferrous-multiview"),
-            egui::ViewportBuilder::default().with_title("Ferrous Multiview").with_inner_size([1000.0, 640.0]).with_min_inner_size([480.0, 320.0]),
+            egui::ViewportBuilder::default().with_title("Ferrous Studio Multiview").with_inner_size([1000.0, 640.0]).with_min_inner_size([480.0, 320.0]),
             |root, _| {
                 if root.ctx().input(|i| i.viewport().close_requested()) {
                     close = true;
@@ -1610,6 +1633,49 @@ impl FerrousApp {
         }
     }
 
+    /// The program preview to draw: the compositor's own texture when it shares this window's device,
+    /// else the uploaded copy.
+    fn program_texture(&self) -> Option<egui::TextureId> {
+        self.window_preview.map(|(_, id)| id).or_else(|| self.preview_tex.as_ref().map(|t| t.id()))
+    }
+
+    /// Each mixer channel's monitoring mode (0 off, 1 monitor only, 2 monitor and output), from
+    /// where it is saved: the device settings for Desktop/Mic, the scene item for a source.
+    fn channel_monitors(&self) -> std::collections::HashMap<String, u8> {
+        let mut m = std::collections::HashMap::new();
+        m.insert("desktop".to_string(), self.settings.audio.desktop_monitor);
+        m.insert("mic".to_string(), self.settings.audio.mic_monitor);
+        for it in self.scenes.scenes.iter().flat_map(|s| &s.items) {
+            m.entry(format!("source-{}", it.id)).or_insert(it.audio_monitor);
+        }
+        m
+    }
+
+    /// Sets a channel's monitoring as its settings window does (same storage, same effect).
+    fn set_channel_monitor(&mut self, id: &str, mode: u8) {
+        match id {
+            "desktop" | "mic" => {
+                if id == "desktop" {
+                    self.settings.audio.desktop_monitor = mode;
+                    if mode != 0 {
+                        self.toast("Monitoring desktop audio on the same device you hear it on will echo.", false);
+                    }
+                } else {
+                    self.settings.audio.mic_monitor = mode;
+                }
+                if let Err(e) = self.engine.apply_settings(self.settings.clone()) {
+                    self.toast(e.to_string(), true);
+                }
+            }
+            other => {
+                let item_id: Option<u64> = other.strip_prefix("source-").and_then(|n| n.parse().ok());
+                if let Some(it) = item_id.and_then(|i| self.item_mut(i)) {
+                    it.audio_monitor = mode;
+                }
+            }
+        }
+    }
+
     /// Starts an output on a helper thread; its message is shown when it's done (see `poll_starts`).
     fn start_in_background(&mut self, kind: StartKind, start: impl FnOnce(ferrous_engine::Control) -> (String, bool) + Send + 'static) {
         let control = self.engine.control();
@@ -1872,32 +1938,49 @@ impl FerrousApp {
         }
         theme::card().show(ui, |ui| {
             ui.set_width(ui.available_width());
-            widgets::dock_title(ui, "Controls");
+            // Fit the dock instead of scrolling: what everything needs at full size, against the room
+            // there is. Short on room, buttons get shorter and Settings/Recordings move up beside the
+            // title (where they can't be pushed out of view).
+            let gap = ui.spacing().item_spacing.y;
+            let replay_rows = if ui.available_width() >= 300.0 { 1.0 } else { 2.0 };
+            let full = 2.0 * 38.0 + (replay_rows + 3.0) * 28.0 + (replay_rows + 6.0) * gap + 12.0;
+            self.controls_compact = ui.available_height() < full;
+            let (action_h, row_h) = if self.controls_compact { (30.0, 24.0) } else { (38.0, 28.0) };
+            if self.controls_compact {
+                ui.horizontal(|ui| {
+                    widgets::dock_title(ui, "Controls");
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.small_button("📁").on_hover_text("Recordings: open the folder").clicked() {
+                            open_folder(&self.settings.record.folder);
+                        }
+                        if ui.small_button("⚙").on_hover_text("Settings").clicked() {
+                            self.settings_win.open_with(&self.settings, &self.scenes);
+                        }
+                    });
+                });
+            } else {
+                widgets::dock_title(ui, "Controls");
+            }
             let streaming = self.engine.is_streaming();
             let label = if self.is_starting(StartKind::Stream) { "Starting…" } else if streaming { "Stop Streaming" } else { "Start Streaming" };
-            if widgets::action_button(ui, label, streaming).clicked() {
+            if widgets::action_button_h(ui, label, streaming, action_h).clicked() {
                 self.request_start(crate::preflight::Kind::Stream);
             }
             let recording = self.engine.is_recording();
             let label = if self.is_starting(StartKind::Record) { "Starting…" } else if recording { "Stop Recording" } else { "Start Recording" };
-            if widgets::action_button(ui, label, recording).clicked() {
+            if widgets::action_button_h(ui, label, recording, action_h).clicked() {
                 self.request_start(crate::preflight::Kind::Record);
             }
             self.replay_and_vcam(ui);
             let label = if self.studio_mode { "Exit Studio Mode" } else { "Studio Mode" };
-            if ui.add_sized([ui.available_width(), 28.0], egui::Button::selectable(self.studio_mode, label)).on_hover_text("Edit the next scene privately in a second preview, then push it live with Transition.").clicked() {
+            if ui.add_sized([ui.available_width(), row_h], egui::Button::selectable(self.studio_mode, label)).on_hover_text("Edit the next scene privately in a second preview, then push it live with Transition.").clicked() {
                 self.studio_mode = !self.studio_mode;
                 self.studio_scene = self.scenes.current;
                 self.selected = None;
             }
-            ui.horizontal(|ui| {
-                if ui.button("⚙ Settings").clicked() {
-                    self.settings_win.open_with(&self.settings, &self.scenes);
-                }
-                if ui.button("📁 Recordings").clicked() {
-                    open_folder(&self.settings.record.folder);
-                }
-            });
+            if !self.controls_compact {
+                self.settings_and_recordings(ui);
+            }
         });
     }
 
@@ -1905,6 +1988,7 @@ impl FerrousApp {
     fn simple_controls(&mut self, ui: &mut egui::Ui) {
         use crate::preflight::Kind as Start;
         use StartKind as Start2;
+        self.controls_compact = false;
         theme::card().show(ui, |ui| {
             ui.set_width(ui.available_width());
             widgets::dock_title(ui, "Controls");
@@ -1929,22 +2013,35 @@ impl FerrousApp {
             let hint = if streaming { format!("Live… {}", fmt_duration(st.streaming.elapsed)) } else { format!("To {}", self.settings.stream.service) };
             ui.label(RichText::new(hint).small().color(theme::muted()));
             ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                if ui.button("⚙ Settings").clicked() {
-                    self.settings_win.open_with(&self.settings, &self.scenes);
-                }
-                if ui.button("📁 Recordings").clicked() {
-                    open_folder(&self.settings.record.folder);
-                }
-            });
+            self.settings_and_recordings(ui);
             egui::CollapsingHeader::new(RichText::new("More").small().color(theme::muted())).id_salt("simple_more").show(ui, |ui| {
                 self.replay_and_vcam(ui);
             });
         });
     }
 
+    /// Settings and Recordings, sharing the row evenly so they stay centred at any dock width (and
+    /// stacking when it is too narrow for both labels).
+    fn settings_and_recordings(&mut self, ui: &mut egui::Ui) {
+        let full = ui.available_width();
+        let gap = ui.spacing().item_spacing.x;
+        let (settings, recordings) = if full >= 220.0 {
+            let w = (full - gap) / 2.0;
+            ui.horizontal(|ui| (ui.add_sized([w, 28.0], egui::Button::new("⚙ Settings")).clicked(), ui.add_sized([w, 28.0], egui::Button::new("📁 Recordings")).clicked())).inner
+        } else {
+            (ui.add_sized([full, 28.0], egui::Button::new("⚙ Settings")).clicked(), ui.add_sized([full, 28.0], egui::Button::new("📁 Recordings")).clicked())
+        };
+        if settings {
+            self.settings_win.open_with(&self.settings, &self.scenes);
+        }
+        if recordings {
+            open_folder(&self.settings.record.folder);
+        }
+    }
+
     /// Instant replay and the virtual camera.
     fn replay_and_vcam(&mut self, ui: &mut egui::Ui) {
+        let row_h = if self.controls_compact { 24.0 } else { 28.0 };
         let replay = self.engine.is_replay_active();
         // Side by side when both labels fit, stacked full-width when the
         // dock is narrow (a fixed minimum width ran past the dock edge).
@@ -1954,12 +2051,12 @@ impl FerrousApp {
         if full >= 300.0 {
             ui.horizontal(|ui| {
                 let w = (full - ui.spacing().item_spacing.x) / 2.0;
-                toggle = ui.add_sized([w, 28.0], egui::Button::selectable(replay, label)).on_hover_text("Keeps the last few seconds in memory so you can save a replay after something happens.").clicked();
-                save = ui.add_enabled_ui(replay, |ui| ui.add_sized([w, 28.0], egui::Button::new("💾 Save Replay")).on_hover_text("Saves the last stretch of the replay buffer to a file. Available while the buffer is running.")).inner.clicked();
+                toggle = ui.add_sized([w, row_h], egui::Button::selectable(replay, label)).on_hover_text("Keeps the last few seconds in memory so you can save a replay after something happens.").clicked();
+                save = ui.add_enabled_ui(replay, |ui| ui.add_sized([w, row_h], egui::Button::new("💾 Save Replay")).on_hover_text("Saves the last stretch of the replay buffer to a file. Available while the buffer is running.")).inner.clicked();
             });
         } else {
-            toggle = ui.add_sized([full, 28.0], egui::Button::selectable(replay, label)).on_hover_text("Keeps the last few seconds in memory so you can save a replay after something happens.").clicked();
-            save = ui.add_enabled_ui(replay, |ui| ui.add_sized([full, 28.0], egui::Button::new("💾 Save Replay")).on_hover_text("Saves the last stretch of the replay buffer to a file. Available while the buffer is running.")).inner.clicked();
+            toggle = ui.add_sized([full, row_h], egui::Button::selectable(replay, label)).on_hover_text("Keeps the last few seconds in memory so you can save a replay after something happens.").clicked();
+            save = ui.add_enabled_ui(replay, |ui| ui.add_sized([full, row_h], egui::Button::new("💾 Save Replay")).on_hover_text("Saves the last stretch of the replay buffer to a file. Available while the buffer is running.")).inner.clicked();
         }
         if toggle {
             self.perform(HotkeyAction::ToggleReplayBuffer);
@@ -1973,8 +2070,8 @@ impl FerrousApp {
             Some((true, _)) => "Stop Virtual Camera  ·  in use".to_string(),
             Some((false, _)) => "Stop Virtual Camera".to_string(),
         };
-        let r = ui.add_sized([ui.available_width(), 28.0], egui::Button::selectable(vcam.is_some(), label)).on_hover_text(
-            "\"Ferrous Virtual Camera\" (1080p30) for Zoom, Teams, Discord, browsers… Needs Windows 11 and the camera installed once (Tools → Install Virtual Camera).",
+        let r = ui.add_sized([ui.available_width(), row_h], egui::Button::selectable(vcam.is_some(), label)).on_hover_text(
+            "\"Ferrous Studio Virtual Camera\" (1080p30) for Zoom, Teams, Discord, browsers… Needs Windows 11 and the camera installed once (Tools → Install Virtual Camera).",
         );
         if r.clicked() {
             if vcam.is_some() {
@@ -2014,6 +2111,9 @@ impl FerrousApp {
         let vertical = self.settings.ui.mixer_vertical;
         let mut set_volume: Vec<(String, f32)> = Vec::new();
         let mut open_props = None;
+        // Each channel's monitoring, for its quick toggle (🎧).
+        let mut toggle_monitor: Option<String> = None;
+        let monitors: std::collections::HashMap<String, u8> = self.channel_monitors();
         let mut toggle_layout = false;
         theme::card().show(ui, |ui| {
             ui.set_width(ui.available_width());
@@ -2063,10 +2163,14 @@ impl FerrousApp {
                             let btn_row = Rect::from_min_max(Pos2::new(rect.left() + 6.0, rect.bottom() - 30.0), Pos2::new(rect.right() - 6.0, rect.bottom() - 6.0));
                             ui.scope_builder(egui::UiBuilder::new().max_rect(btn_row), |ui| {
                                 ui.horizontal_centered(|ui| {
+                                    ui.spacing_mut().item_spacing.x = 3.0;
                                     if mute_button(ui, ch.muted(), mute_t).clicked() {
                                         ch.set_muted(!ch.muted());
                                     }
-                                    if ui.small_button("⚙").on_hover_text("Filters, tracks, monitoring").clicked() {
+                                    if monitor_button(ui, monitors.get(&ch.id).copied().unwrap_or(0)).clicked() {
+                                        toggle_monitor = Some(ch.id.clone());
+                                    }
+                                    if icon_button(ui, "⚙", false).on_hover_text("Filters, tracks, monitoring").clicked() {
                                         open_props = Some(ch.id.clone());
                                     }
                                 });
@@ -2088,8 +2192,11 @@ impl FerrousApp {
                             // left (truncated), so nothing overprints when narrow.
                             let name = ch.name.lock().clone();
                             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                if ui.small_button("⚙").on_hover_text("Filters, tracks, monitoring").clicked() {
+                                if icon_button(ui, "⚙", false).on_hover_text("Filters, tracks, monitoring").clicked() {
                                     open_props = Some(ch.id.clone());
+                                }
+                                if monitor_button(ui, monitors.get(&ch.id).copied().unwrap_or(0)).clicked() {
+                                    toggle_monitor = Some(ch.id.clone());
                                 }
                                 ui.label(RichText::new(mixer::fmt_db(ch.volume())).small().color(theme::muted()));
                                 let name_w = ui.fonts_mut(|f| f.layout_no_wrap(name.clone(), egui::FontId::proportional(14.0), theme::text()).size().x);
@@ -2129,6 +2236,10 @@ impl FerrousApp {
                 "mic" => self.settings.audio.mic_volume = g,
                 _ => {}
             }
+        }
+        if let Some(id) = toggle_monitor {
+            let next = if monitors.get(&id).copied().unwrap_or(0) == 0 { 2 } else { 0 };
+            self.set_channel_monitor(&id, next);
         }
         if let Some(id) = open_props {
             self.audio_props = Some(id);
@@ -2351,11 +2462,17 @@ impl FerrousApp {
                         let found = ferrous_link::discovered();
                         egui::ComboBox::from_id_salt("linksrc").selected_text(if sender.is_empty() { "Select a sender" } else { sender.as_str() }).width(220.0).show_ui(ui, |ui| {
                             for a in &found {
-                                let label = format!("{}  ({}×{} {:?}{})", a.name, a.width, a.height, a.codec, if a.encrypted { ", PIN" } else { "" });
-                                ui.selectable_value(sender, a.name.clone(), label);
+                                let pc = if a.computer.is_empty() { String::new() } else { format!(" on {}", a.computer) };
+                                let label = format!("{}{pc}  ({}×{} {:?}{})", a.name.trim(), a.width, a.height, a.codec, if a.encrypted { ", PIN" } else { "" });
+                                ui.selectable_value(sender, a.name.trim().to_string(), label);
                             }
                             if found.is_empty() {
                                 ui.label(RichText::new("No senders found yet…").small().color(theme::muted()));
+                                ui.label(
+                                    RichText::new("Senders announce themselves on UDP port 47777. If yours never shows up, allow Ferrous Studio through Windows Firewall on both PCs (for Private networks), and make sure Windows sees your network as Private, not Public.")
+                                        .small()
+                                        .color(theme::muted()),
+                                );
                             }
                         });
                         ui.horizontal(|ui| {
@@ -2518,14 +2635,26 @@ impl FerrousApp {
     /// Every card is a dock: drag a tab to snap it beside, above, below or
     /// into another dock, or out of the window to float it.
     fn dock_area(&mut self, ui: &mut egui::Ui) {
-        let style = crate::layout::style(ui.style().as_ref(), &self.settings.ui);
+        let style = crate::layout::style(ui.style().as_ref());
         let locked = self.settings.ui.lock_layout || self.settings.ui.simple_mode;
         let mates = self.layout.mates();
         let mut tree = std::mem::replace(&mut self.layout.tree, egui_stack::DockState::new(Vec::new()));
-        let mut viewer = DockViewer { app: self, mates, closed: Vec::new(), locked };
+        // A tile holding one dock shows no tab bar, just a small title in its corner (the strip it
+        // sits in is the drag handle); a tile holding several keeps its tabs to switch between.
+        let mut solo = std::collections::HashSet::new();
+        for (_, leaf) in tree.iter_leaves_mut() {
+            let one = leaf.tabs.len() == 1;
+            leaf.tab_bar_hidden = one;
+            if one {
+                solo.insert(leaf.tabs[0]);
+            }
+        }
+        let mut viewer = DockViewer { app: self, mates, closed: Vec::new(), locked, solo, close: Vec::new() };
         egui_stack::DockArea::new(&mut tree)
             .id(egui::Id::new("ember_docks"))
             .style(style)
+            .hidable_tab_bars(true)
+            .tab_context_menus(false)
             .draggable_tabs(!locked)
             .show_close_buttons(!locked)
             .show_leaf_close_all_buttons(false)
@@ -2533,11 +2662,16 @@ impl FerrousApp {
             .show_window_collapse_buttons(false)
             .show_inside(ui, &mut viewer);
         let closed = std::mem::take(&mut viewer.closed);
+        let close = std::mem::take(&mut viewer.close);
         self.layout.tree = tree;
         for (d, mate) in closed {
             if let Some(m) = mate {
                 self.layout.set_anchor(d, m);
             }
+        }
+        // Closed from a corner title's ✕ (tiles without a tab bar).
+        for d in close {
+            self.layout.close(d);
         }
         self.layout.ensure_preview();
         self.layout.store(&mut self.settings.ui);
@@ -2744,8 +2878,8 @@ impl FerrousApp {
         self.note_preview_drawn(ui, rect, false);
         if !self.settings.ui.preview_enabled {
             self.preview_disabled_overlay(ui, rect);
-        } else if let Some(tex) = &self.preview_tex {
-            painter.image(tex.id(), rect, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
+        } else if let Some(id) = self.program_texture() {
+            painter.image(id, rect, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
         }
         painter.rect_stroke(rect, 0, Stroke::new(1.5, theme::live()), StrokeKind::Outside);
     }
@@ -2784,6 +2918,10 @@ impl FerrousApp {
         let fit = |px: u32, max: f32| -> u32 { (px.div_ceil(64) * 64).clamp(160, (max as u32).max(160)) };
         let cfg = ferrous_engine::PreviewConfig {
             enabled: self.settings.ui.preview_enabled && (!minimised || self.projector_open) && (main_px > 0 || vert_px > 0 || self.projector_open),
+            // Nothing on screen shows the main canvas (its Preview dock closed, vertical-only): don't
+            // draw its preview at all.
+            main: main_px > 0 || self.projector_open,
+            vertical: vert_px > 0,
             max_fps: self.settings.ui.preview_max_fps,
             width: if main_px > 0 { fit(main_px, cw) } else { self.preview_sent.map_or(1280, |c| c.width) },
             vertical_width: if vert_px > 0 { fit(vert_px, vw) } else { self.preview_sent.map_or(720, |c| c.vertical_width) },
@@ -2841,11 +2979,11 @@ impl FerrousApp {
 
         painter.rect_filled(rect, 0, Color32::BLACK);
         self.note_preview_drawn(ui, rect, vert);
-        let tex = if vert { &self.vertical_tex } else if self.studio_mode { &self.studio_tex } else { &self.preview_tex };
+        let tex = if vert { self.window_vertical.map(|(_, id)| id).or_else(|| self.vertical_tex.as_ref().map(|t| t.id())) } else if self.studio_mode { self.studio_tex.as_ref().map(|t| t.id()) } else { self.program_texture() };
         if !self.settings.ui.preview_enabled {
             self.preview_disabled_overlay(ui, rect);
         } else if let Some(tex) = tex {
-            painter.image(tex.id(), rect, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
+            painter.image(tex, rect, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
         } else {
             painter.text(rect.center(), Align2::CENTER_CENTER, "Starting…", egui::FontId::proportional(16.0), theme::muted());
         }
@@ -3624,7 +3762,8 @@ impl FerrousApp {
             ctx.set_zoom_factor(want);
             self.scale_applied = want;
         }
-        theme::sync_access(ctx, self.settings.ui.high_contrast, self.settings.ui.meter_patterns, self.settings.ui.reduce_motion);
+        // Animations Off also stops fades and sliding (it used to be a separate "Reduce motion").
+        theme::sync_access(ctx, self.settings.ui.high_contrast, self.settings.ui.meter_patterns, self.settings.ui.motion == 0);
 
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::K)) {
             self.palette.toggle();
@@ -3674,6 +3813,23 @@ impl eframe::App for FerrousApp {
         }
         self.last_ui_frame = Some(Instant::now());
         let ctx = ui.ctx().clone();
+        // Ctrl+Shift+F12: save a PNG of this window (for bug reports and docs) under the settings folder.
+        if ctx.input(|i| i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(egui::Key::F12)) {
+            ctx.request_screenshot(move |img| {
+                let dir = ferrous_core::paths::config_dir().join("screenshots");
+                let _ = std::fs::create_dir_all(&dir);
+                let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
+                let path = dir.join(format!("Ferrous Studio {stamp}.png"));
+                let [w, h] = img.size;
+                let rgba: Vec<u8> = img.pixels.iter().flat_map(|c| c.to_array()).collect();
+                let msg = match image::RgbaImage::from_raw(w as u32, h as u32, rgba).map(|i| i.save(&path)) {
+                    Some(Ok(())) => format!("Screenshot saved to {}", path.display()),
+                    Some(Err(e)) => format!("Couldn't save the screenshot: {e}"),
+                    None => "Couldn't save the screenshot".to_string(),
+                };
+                log::info!("{msg}");
+            });
+        }
         let (tid, tglass, tmotion) = match self.settings_win.theme_preview() {
             Some((i, g, m)) => (i.to_string(), g, m),
             None => (self.settings.ui.theme.clone(), self.settings.ui.glass, self.settings.ui.motion),
@@ -3943,7 +4099,45 @@ struct DockViewer<'a> {
     mates: std::collections::HashMap<crate::layout::Dock, crate::layout::Dock>,
     closed: Vec<(crate::layout::Dock, Option<crate::layout::Dock>)>,
     locked: bool,
+    /// Docks alone in their tile: drawn with a corner title instead of a tab bar.
+    solo: std::collections::HashSet<crate::layout::Dock>,
+    /// Docks closed from a corner title this frame (closed after the dock area is drawn).
+    close: Vec<crate::layout::Dock>,
 }
+
+impl DockViewer<'_> {
+    /// The title of a dock alone in its tile: small, in the strip that is also its drag handle,
+    /// with a ✕ while the pointer is over the tile (if it may be closed).
+    fn corner_title(&mut self, ui: &mut egui::Ui, tab: &mut crate::layout::Dock) {
+        use egui_stack::TabViewer as _;
+        let title = self.title(tab).text().to_string();
+        let (row, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), CORNER_TITLE_H), Sense::hover());
+        // On a near-solid chip, so it reads on every theme (glass themes put the tile over bright glows).
+        let galley = ui.painter().layout_no_wrap(title, egui::FontId::proportional(11.0), theme::muted());
+        let text_pos = row.left_center() + Vec2::new(5.0, -galley.size().y / 2.0);
+        let chip = Rect::from_min_size(text_pos, galley.size()).expand2(Vec2::new(4.0, 1.0));
+        ui.painter().rect_filled(chip, 3, theme::panel().gamma_multiply(0.9));
+        ui.painter().galley(text_pos, galley, theme::muted());
+        let tile = ui.max_rect().union(row);
+        if self.is_closeable(tab) && ui.rect_contains_pointer(tile) {
+            // Its own layer above the tile: the drag handle under it would otherwise take the click.
+            let pos = row.right_top() - Vec2::new(20.0, 0.0);
+            let clicked = egui::Area::new(egui::Id::new(("dock_close", tab.id(), ui.id())))
+                .order(egui::Order::Middle)
+                .fixed_pos(pos)
+                .show(ui.ctx(), |ui| ui.add_sized([18.0, CORNER_TITLE_H], egui::Button::new(RichText::new("✕").size(10.0).color(theme::muted())).frame(false)).on_hover_text("Close"))
+                .inner
+                .clicked();
+            if clicked {
+                self.closed.push((*tab, self.mates.get(tab).copied()));
+                self.close.push(*tab);
+            }
+        }
+    }
+}
+
+/// Height of a corner title (see `DockViewer::corner_title`): also the hidden tab bar's drag strip.
+pub const CORNER_TITLE_H: f32 = 16.0;
 
 impl egui_stack::TabViewer for DockViewer<'_> {
     type Tab = crate::layout::Dock;
@@ -3975,6 +4169,9 @@ impl egui_stack::TabViewer for DockViewer<'_> {
     fn ui(&mut self, ui: &mut egui::Ui, tab: &mut Self::Tab) {
         // The weather lands on whatever panel this is, the video preview included.
         fx::note_panel(ui.max_rect().expand(8.0));
+        if self.solo.contains(tab) {
+            self.corner_title(ui, tab);
+        }
         if let crate::layout::Dock::Custom(id) = *tab {
             self.app.custom_dock(ui, id);
         } else if tab.is_canvas() {
@@ -3985,11 +4182,11 @@ impl egui_stack::TabViewer for DockViewer<'_> {
     }
 
     fn is_closeable(&self, tab: &Self::Tab) -> bool {
-        tab.closeable() && !self.locked
+        self.app.layout.can_close(*tab) && !self.locked
     }
 
     fn on_close(&mut self, tab: &mut Self::Tab) -> egui_stack::tab_viewer::OnCloseResponse {
-        if !tab.closeable() {
+        if !self.app.layout.can_close(*tab) {
             return egui_stack::tab_viewer::OnCloseResponse::Ignore;
         }
         self.closed.push((*tab, self.mates.get(tab).copied()));
@@ -4080,11 +4277,32 @@ enum PropsPart {
     Filters,
 }
 
+/// Size of the mixer's small icon buttons (mute, monitoring, settings), so they line up.
+const ICON_BUTTON: Vec2 = Vec2::new(22.0, 20.0);
+
 /// Speaker button that crossfades to red when muted.
 fn mute_button(ui: &mut egui::Ui, muted: bool, t: f32) -> egui::Response {
     let fill = theme::surface().lerp_to_gamma(theme::live().linear_multiply(0.55), t);
-    ui.add(egui::Button::new(RichText::new(if muted { "🔇" } else { "🔊" }).small()).fill(fill).min_size(Vec2::new(22.0, 18.0)))
+    ui.add_sized(ICON_BUTTON, egui::Button::new(RichText::new(if muted { "🔇" } else { "🔊" }).size(11.0)).fill(fill))
         .on_hover_text(if muted { "Unmute" } else { "Mute" })
+}
+
+/// A mixer icon button at the shared size; `on` fills it with the accent.
+fn icon_button(ui: &mut egui::Ui, icon: &str, on: bool) -> egui::Response {
+    let b = egui::Button::new(RichText::new(icon).size(11.0).color(if on { theme::on(theme::accent()) } else { theme::text() }));
+    let b = if on { b.fill(theme::accent()) } else { b.fill(theme::surface()) };
+    ui.add_sized(ICON_BUTTON, b)
+}
+
+/// Monitoring on/off (🎧), lit while you can hear the channel: like OBS's monitor toggle, it
+/// switches between Off and "Monitor and output" (both other modes are in the channel's settings).
+fn monitor_button(ui: &mut egui::Ui, mode: u8) -> egui::Response {
+    let tip = match mode {
+        1 => "Monitoring: monitor only (not in the output). Click to turn off.",
+        2 => "Monitoring: on (you hear it, and it's in the output). Click to turn off.",
+        _ => "Monitoring: off. Click to hear this channel through your monitoring device.",
+    };
+    icon_button(ui, "🎧", mode != 0).on_hover_text(tip)
 }
 
 /// "Fit to screen" that respects rotation: the rotated box's bounds are
@@ -4097,4 +4315,54 @@ fn fit_rotated(t: &Transform, src_w: u32, src_h: u32, cw: f32, ch: f32) -> Trans
     let k = (cw / bw).min(ch / bh);
     let (ow, oh) = (w * k, h * k);
     Transform { x: (cw - ow) / 2.0, y: (ch - oh) / 2.0, scale_x: k, scale_y: k, ..*t }
+}
+
+/// With *GPU preview* on, lends the window's GPU device to the compositor (before the engine starts),
+/// so the preview is drawn where the window shows it. Only on DX12 on Windows, where capture sharing
+/// and in-process encoding work; otherwise the compositor keeps its own device.
+fn share_window_device(cc: &eframe::CreationContext<'_>, settings: &Settings) {
+    let wanted = settings.video.gpu_preview && settings.video.renderer != ferrous_core::RendererMode::Cpu;
+    let Some(rs) = cc.wgpu_render_state.as_ref().filter(|_| wanted) else {
+        ferrous_render::share_window_device(None);
+        return;
+    };
+    let backend = rs.adapter.get_info().backend;
+    if cfg!(windows) && backend != ferrous_render::wgpu::Backend::Dx12 {
+        log::info!("GPU preview: the window draws with {backend:?}, not DX12; keeping the usual preview");
+        ferrous_render::share_window_device(None);
+        return;
+    }
+    // Resizing the window waits for the GPU to go idle and fails if another thread submitted work
+    // meanwhile, which the compositor on this device does every frame. That failure is harmless
+    // (the surface is reconfigured on a later frame) but wgpu's default handler panics on every
+    // error, so this one is only logged; any other error still stops as before.
+    rs.device.on_uncaptured_error(std::sync::Arc::new(|e: ferrous_render::wgpu::Error| {
+        let text = e.to_string();
+        if text.contains("come idle") {
+            log::debug!("window resize raced the compositor; retrying on a later frame");
+            return;
+        }
+        panic!("wgpu error: {text}");
+    }));
+    ferrous_render::share_window_device(Some((rs.adapter.clone(), rs.device.clone(), rs.queue.clone())));
+}
+
+/// Registers (or re-points, after a size change) a compositor texture with egui so the window can
+/// draw it. Plain RGBA8, like egui's own textures: egui does its gamma handling itself, and an sRGB
+/// view would decode the values a second time and darken the picture.
+fn register_window_preview(rs: &eframe::egui_wgpu::RenderState, wp: Option<ferrous_engine::WindowPreview>, slot: &mut Option<(u64, egui::TextureId)>) {
+    let Some(wp) = wp else { return };
+    if slot.is_some_and(|(g, _)| g == wp.generation) {
+        return;
+    }
+    let view = wp.texture.create_view(&Default::default());
+    let mut r = rs.renderer.write();
+    let id = match *slot {
+        Some((_, id)) => {
+            r.update_egui_texture_from_wgpu_texture(&rs.device, &view, ferrous_render::wgpu::FilterMode::Linear, id);
+            id
+        }
+        None => r.register_native_texture(&rs.device, &view, ferrous_render::wgpu::FilterMode::Linear),
+    };
+    *slot = Some((wp.generation, id));
 }
